@@ -83,23 +83,31 @@ async def update_player_elo(session, player_id, game="cs2"):
     return None, []
 
 # Function to fetch player details from FACEIT API
-async def fetch_player(session, nickname):
+async def fetch_player(session, nickname_or_id):
+    """Fetch player details from FACEIT API by nickname or ID"""
     headers = {
         'Authorization': f'Bearer {FACEIT_API_KEY}'
     }
     
-    url = f"{FACEIT_API_URL}/players?nickname={nickname}"
+    # Check if this is likely an ID (length and format check)
+    if len(nickname_or_id) >= 32 and '-' in nickname_or_id:
+        # This is likely an ID, use the player ID endpoint
+        url = f"{FACEIT_API_URL}/players/{nickname_or_id}"
+    else:
+        # This is likely a nickname, use the player lookup endpoint
+        url = f"{FACEIT_API_URL}/players?nickname={nickname_or_id}"
     
     try:
         async with session.get(url, headers=headers) as response:
             if response.status == 200:
                 return await response.json()
             else:
-                logger.error(f"Failed to fetch player {nickname}: {response.status}")
+                logger.error(f"Failed to fetch player {nickname_or_id}: {response.status}")
                 return None
     except Exception as e:
-        logger.error(f"Error fetching player {nickname}: {str(e)}")
+        logger.error(f"Error fetching player {nickname_or_id}: {str(e)}")
         return None
+
 
 # Function to fetch player match history
 async def fetch_player_history(session, player_id, game="cs2", limit=5):
@@ -162,8 +170,8 @@ async def fetch_match_stats(session, match_id):
 def format_time(timestamp):
     if timestamp:
         dt = datetime.fromtimestamp(timestamp)
-        return dt.strftime("%Y-%m-%d %H:%M")
-    return "Unknown time"
+        return dt.strftime("%d.%m, %H:%M Uhr")
+    return "Unbekannte Zeit"
 
 # Create an embed for match details with stats
 async def create_match_embed(match_data, player_nickname, session):
@@ -188,14 +196,14 @@ async def create_match_embed(match_data, player_nickname, session):
     
     # Create embed
     embed = discord.Embed(
-        title=f"Match Result",
+        title=f"Match Ergebnis",
         url=faceit_url,
         color=discord.Color.blue()
     )
     
     # Add match times
     finished_at = format_time(match_data.get('finished_at'))
-    embed.add_field(name="Finished", value=finished_at if match_data.get('finished_at') else "In progress", inline=True)
+    embed.add_field(name="Beendet", value=finished_at if match_data.get('finished_at') else "Läuft noch", inline=True)
     
     # Get match stats to find player performance and detailed round score
     stats_data = await fetch_match_stats(session, match_id)
@@ -210,7 +218,7 @@ async def create_match_embed(match_data, player_nickname, session):
         for round_data in stats_data['rounds']:
             if 'round_stats' in round_data and 'Score' in round_data['round_stats']:
                 detailed_round_score = round_data['round_stats']['Score']
-                embed.add_field(name="Round Score", value=detailed_round_score, inline=True)
+                embed.add_field(name="Runden", value=detailed_round_score, inline=True)
                 
                 # Parse the round score safely to get the total rounds played
                 try:
@@ -271,10 +279,10 @@ async def create_match_embed(match_data, player_nickname, session):
                         
                         # Add player performance section
                         embed.add_field(
-                            name=f"Player: {player_name}",
+                            name=f"Spieler: {player_name}",
                             value=(
                                 f"Kills: {kills}\n"
-                                f"Deaths: {deaths}\n"
+                                f"Tode: {deaths}\n"
                                 f"K/D: {kd_ratio}\n"
                                 f"K/R: {kr_ratio}"
                             ),
@@ -292,14 +300,14 @@ async def create_match_embed(match_data, player_nickname, session):
     if player_team and results and 'winner' in results:
         winner = results.get('winner')
         if winner == player_team or winner == player_team.replace('team', 'faction'):
-            win_status = "✅ Win"
+            win_status = "✅ Easy Win"
             embed.color = discord.Color.green()
         else:
-            win_status = "❌ Loss"
+            win_status = "❌ Verkackt"
             embed.color = discord.Color.red()
     
     # Add win/loss status
-    embed.add_field(name="Result", value=win_status, inline=True)
+    embed.add_field(name="Ergebnis", value=win_status, inline=True)
     
     # Update and fetch ELO information if we found the player ID
     if player_id:
@@ -326,12 +334,12 @@ async def create_match_embed(match_data, player_nickname, session):
 
 @bot.event
 async def on_ready():
-    logger.info(f'Bot logged in as {bot.user}')
+    logger.info(f'Bot angemeldet als {bot.user}')
     check_match_updates.start()
 
 @bot.command(name='track')
 async def track_player(ctx, nickname):
-    """Track a FACEIT player's matches"""
+    """Verfolge einen FACEIT-Spieler"""
     guild_id = str(ctx.guild.id)
     
     # Initialize server entry if not exists
@@ -344,7 +352,7 @@ async def track_player(ctx, nickname):
     
     # Check if player already tracked
     if nickname.lower() in [p.lower() for p in tracked_players[guild_id]["players"]]:
-        await ctx.send(f"Player {nickname} is already being tracked!")
+        await ctx.send(f"Spieler {nickname} wird bereits verfolgt!")
         return
     
     async with aiohttp.ClientSession() as session:
@@ -367,17 +375,17 @@ async def track_player(ctx, nickname):
             
             save_tracked_players()
             save_player_elo_history()
-            await ctx.send(f"Now tracking FACEIT player: {nickname} (ID: {player_id})")
+            await ctx.send(f"FACEIT-Spieler wird jetzt verfolgt: {nickname} (ID: {player_id})")
         else:
-            await ctx.send(f"Could not find player with nickname: {nickname}")
+            await ctx.send(f"Konnte Spieler mit Namen {nickname} nicht finden")
 
 @bot.command(name='untrack')
 async def untrack_player(ctx, nickname):
-    """Stop tracking a FACEIT player's matches"""
+    """Höre auf, einen FACEIT-Spieler zu verfolgen"""
     guild_id = str(ctx.guild.id)
     
     if guild_id not in tracked_players:
-        await ctx.send("No players are being tracked in this server.")
+        await ctx.send("Es werden keine Spieler in diesem Server verfolgt.")
         return
     
     player_found = False
@@ -391,25 +399,25 @@ async def untrack_player(ctx, nickname):
     
     if player_found:
         save_tracked_players()
-        await ctx.send(f"Stopped tracking player: {nickname}")
+        await ctx.send(f"Verfolgung von Spieler {nickname} beendet.")
     else:
-        await ctx.send(f"Player {nickname} is not being tracked.")
+        await ctx.send(f"Spieler {nickname} wird nicht verfolgt.")
 
 @bot.command(name='list')
 async def list_tracked_players(ctx):
-    """List all tracked FACEIT players"""
+    """Liste alle verfolgten FACEIT-Spieler auf"""
     guild_id = str(ctx.guild.id)
     
     if guild_id not in tracked_players or not tracked_players[guild_id]["players"]:
-        await ctx.send("No players are being tracked in this server.")
+        await ctx.send("Es werden keine Spieler in diesem Server verfolgt.")
         return
     
     players_list = "\n".join(tracked_players[guild_id]["players"].keys())
-    await ctx.send(f"**Tracked FACEIT players:**\n{players_list}")
+    await ctx.send(f"**Verfolgte FACEIT-Spieler:**\n{players_list}")
 
 @bot.command(name='recent')
 async def recent_matches(ctx, nickname, count: int = 3):
-    """Show recent matches for a tracked player"""
+    """Zeige aktuelle Matches für einen verfolgten Spieler"""
     if count > 10:
         count = 10  # Limit to 10 matches to avoid spamming
     
@@ -417,20 +425,20 @@ async def recent_matches(ctx, nickname, count: int = 3):
         player_data = await fetch_player(session, nickname)
         
         if not player_data:
-            await ctx.send(f"Could not find player with nickname: {nickname}")
+            await ctx.send(f"Konnte Spieler mit Namen {nickname} nicht finden")
             return
             
         player_id = player_data.get('player_id')
         history_data = await fetch_player_history(session, player_id, limit=count)
         
         if not history_data or 'items' not in history_data:
-            await ctx.send(f"Could not fetch match history for player: {nickname}")
+            await ctx.send(f"Konnte Match-Verlauf für Spieler {nickname} nicht abrufen")
             return
             
         matches = history_data['items']
         
         if not matches:
-            await ctx.send(f"No recent matches found for player: {nickname}")
+            await ctx.send(f"Keine aktuellen Matches für Spieler {nickname} gefunden")
             return
             
         for match in matches:
@@ -441,13 +449,13 @@ async def recent_matches(ctx, nickname, count: int = 3):
                 embed = await create_match_embed(match_details, nickname, session)
                 await ctx.send(embed=embed)
             else:
-                await ctx.send(f"Could not fetch details for match: {match_id}")
+                await ctx.send(f"Konnte Details für Match {match_id} nicht abrufen")
 
-@tasks.loop(minutes=10)
+@tasks.loop(minutes=5)
 async def check_match_updates():
-    """Check for match updates for all tracked players"""
+    """Prüfe auf Match-Updates für alle verfolgten Spieler"""
     try:
-        logger.info("Checking for match updates...")
+        logger.info("Prüfe auf Match-Updates...")
         
         async with aiohttp.ClientSession() as session:
             for guild_id, guild_data in tracked_players.items():
@@ -455,7 +463,7 @@ async def check_match_updates():
                 channel = bot.get_channel(int(channel_id)) if channel_id else None
                 
                 if not channel:
-                    logger.warning(f"Could not find channel for guild {guild_id}")
+                    logger.warning(f"Konnte den Kanal für Server {guild_id} nicht finden")
                     continue
                 
                 for nickname, player_id in guild_data["players"].items():
@@ -463,7 +471,7 @@ async def check_match_updates():
                     history_data = await fetch_player_history(session, player_id, limit=3)
                     
                     if not history_data or 'items' not in history_data:
-                        logger.warning(f"Could not fetch match history for player: {nickname}")
+                        logger.warning(f"Konnte Match-Verlauf für Spieler {nickname} nicht abrufen")
                         continue
                     
                     matches = history_data['items']
@@ -482,14 +490,14 @@ async def check_match_updates():
                             
                             if match_details and match_details.get('status') == 'FINISHED':
                                 embed = await create_match_embed(match_details, nickname, session)
-                                await channel.send(f"New match result for {nickname}:", embed=embed)
+                                await channel.send(f"Neues Match-Ergebnis für {nickname}:", embed=embed)
                     
                     # Update the known matches
                     tracked_players[guild_id]["last_matches"][player_id] = new_match_ids
             
             save_tracked_players()
     except Exception as e:
-        logger.error(f"Error in check_match_updates task: {str(e)}")
+        logger.error(f"Fehler in der Match-Update-Prüfung: {str(e)}")
 
 @check_match_updates.before_loop
 async def before_check_match_updates():
