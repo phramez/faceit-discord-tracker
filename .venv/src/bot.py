@@ -27,17 +27,60 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Dictionary to store tracked players per server
 tracked_players = {}
+# Dictionary to store player ELO history
+player_elo_history = {}
 # Load tracked players from file if exists
 try:
     with open('tracked_players.json', 'r') as f:
         tracked_players = json.load(f)
 except FileNotFoundError:
     tracked_players = {}
+    
+# Load player ELO history from file if exists
+try:
+    with open('player_elo_history.json', 'r') as f:
+        player_elo_history = json.load(f)
+except FileNotFoundError:
+    player_elo_history = {}
 
 # Helper function to save tracked players to file
 def save_tracked_players():
     with open('tracked_players.json', 'w') as f:
         json.dump(tracked_players, f)
+        
+# Helper function to save player ELO history to file
+def save_player_elo_history():
+    with open('player_elo_history.json', 'w') as f:
+        json.dump(player_elo_history, f)
+        
+# Helper function to update player ELO
+async def update_player_elo(session, player_id, game="cs2"):
+    player_data = await fetch_player(session, player_id)
+    
+    if player_data and 'games' in player_data and game in player_data['games']:
+        current_elo = player_data['games'][game].get('faceit_elo', 0)
+        
+        if player_id not in player_elo_history:
+            player_elo_history[player_id] = {"current": current_elo, "history": []}
+        else:
+            # If ELO changed, add to history
+            if player_elo_history[player_id]["current"] != current_elo:
+                previous_elo = player_elo_history[player_id]["current"]
+                elo_change = current_elo - previous_elo
+                
+                player_elo_history[player_id]["history"].append({
+                    "previous": previous_elo,
+                    "current": current_elo,
+                    "change": elo_change,
+                    "timestamp": datetime.now().timestamp()
+                })
+                
+                player_elo_history[player_id]["current"] = current_elo
+                
+        save_player_elo_history()
+        return current_elo, player_elo_history[player_id]["history"]
+    
+    return None, []
 
 # Function to fetch player details from FACEIT API
 async def fetch_player(session, nickname):
@@ -132,10 +175,21 @@ async def create_match_embed(match_data, player_nickname, session):
     teams = match_data.get('teams', {})
     results = match_data.get('results', {})
     
+    # Fix the match URL
+    faceit_url = match_data.get('faceit_url', '')
+    if faceit_url:
+        # Replace the {lang} placeholder with 'de'
+        faceit_url = faceit_url.replace('{lang}', 'de')
+        # Add /scoreboard if it doesn't already have it and if it contains 'room/'
+        if 'room/' in faceit_url and not faceit_url.endswith('/scoreboard'):
+            faceit_url = faceit_url + '/scoreboard'
+    else:
+        faceit_url = 'https://www.faceit.com'
+    
     # Create embed
     embed = discord.Embed(
         title=f"Match Result",
-        url=match_data.get('faceit_url', 'https://www.faceit.com'),
+        url=faceit_url,
         color=discord.Color.blue()
     )
     
@@ -143,24 +197,58 @@ async def create_match_embed(match_data, player_nickname, session):
     finished_at = format_time(match_data.get('finished_at'))
     embed.add_field(name="Finished", value=finished_at if match_data.get('finished_at') else "In progress", inline=True)
     
-    # Add match score
-    if results and 'score' in results:
-        team1_score = results['score'].get('faction1', '0')
-        team2_score = results['score'].get('faction2', '0')
-        embed.add_field(name="Score", value=f"{team1_score} - {team2_score}", inline=True)
-    
-    # Get match stats to find player performance
+    # Get match stats to find player performance and detailed round score
     stats_data = await fetch_match_stats(session, match_id)
+    detailed_round_score = None
+    player_id = None
+    player_team = None
+    rounds_played = 0
+    win_status = "❓"  # Default unknown status
+    
     if stats_data and 'rounds' in stats_data:
+        # Get detailed round score
+        for round_data in stats_data['rounds']:
+            if 'round_stats' in round_data and 'Score' in round_data['round_stats']:
+                detailed_round_score = round_data['round_stats']['Score']
+                embed.add_field(name="Round Score", value=detailed_round_score, inline=True)
+                
+                # Parse the round score safely to get the total rounds played
+                try:
+                    # Handle different score formats (e.g., "13:10" or "13 / 10")
+                    if ':' in detailed_round_score:
+                        score_parts = detailed_round_score.split(':')
+                    elif '/' in detailed_round_score:
+                        score_parts = detailed_round_score.split('/')
+                    else:
+                        score_parts = detailed_round_score.split()  # Split by whitespace
+                    
+                    # Extract numerical values
+                    score_values = []
+                    for part in score_parts:
+                        # Extract digits only
+                        digits = ''.join(filter(str.isdigit, part))
+                        if digits:
+                            score_values.append(int(digits))
+                    
+                    if len(score_values) >= 2:
+                        rounds_played = sum(score_values[:2])  # Take the first two scores
+                except Exception as e:
+                    logger.error(f"Error parsing round score: {e}")
+                    rounds_played = 0  # Default if parsing fails
+                
+                break
+                
         # Find our player and their stats
         player_found = False
         for round_data in stats_data['rounds']:
-            for team in round_data.get('teams', []):
+            for team_index, team in enumerate(round_data.get('teams', [])):
                 for player_stats in team.get('players', []):
                     player_name = player_stats.get('nickname', '')
                     
                     if player_name.lower() == player_nickname.lower():
                         player_found = True
+                        player_id = player_stats.get('player_id')
+                        player_team = f"team{team_index + 1}"  # team1 or team2
                         stats = player_stats.get('player_stats', {})
                         
                         # Add player stats to embed
@@ -175,15 +263,11 @@ async def create_match_embed(match_data, player_nickname, session):
                             kd_ratio = 'N/A'
                         
                         # Calculate K/R (kills per round)
-                        rounds_played = int(team1_score) + int(team2_score)
                         try:
                             kr_ratio = float(kills) / rounds_played if rounds_played > 0 else 0
                             kr_ratio = round(kr_ratio, 2)
                         except (ValueError, TypeError):
                             kr_ratio = 'N/A'
-                            
-                        # Get ADR if available
-                        adr = stats.get('Average Damage per Round', 'N/A')
                         
                         # Add player performance section
                         embed.add_field(
@@ -192,8 +276,7 @@ async def create_match_embed(match_data, player_nickname, session):
                                 f"Kills: {kills}\n"
                                 f"Deaths: {deaths}\n"
                                 f"K/D: {kd_ratio}\n"
-                                f"K/R: {kr_ratio}\n"
-                                f"ADR: {adr}"
+                                f"K/R: {kr_ratio}"
                             ),
                             inline=False
                         )
@@ -205,9 +288,39 @@ async def create_match_embed(match_data, player_nickname, session):
             if player_found:
                 break
     
-    # Note about ELO change - FACEIT API doesn't directly provide ELO changes
-    # We would need to track player ELO before and after matches to calculate this
-    embed.set_footer(text="ELO changes are not directly available through the FACEIT API")
+    # Determine if player won or lost
+    if player_team and results and 'winner' in results:
+        winner = results.get('winner')
+        if winner == player_team or winner == player_team.replace('team', 'faction'):
+            win_status = "✅ Win"
+            embed.color = discord.Color.green()
+        else:
+            win_status = "❌ Loss"
+            embed.color = discord.Color.red()
+    
+    # Add win/loss status
+    embed.add_field(name="Result", value=win_status, inline=True)
+    
+    # Update and fetch ELO information if we found the player ID
+    if player_id:
+        current_elo, elo_history = await update_player_elo(session, player_id, game)
+        
+        if current_elo:
+            # Find the most recent ELO change if any
+            elo_change_text = ""
+            if elo_history and len(elo_history) > 0:
+                last_change = elo_history[-1]
+                change = last_change.get('change', 0)
+                if change > 0:
+                    elo_change_text = f" (+{change})"
+                elif change < 0:
+                    elo_change_text = f" ({change})"
+            
+            embed.add_field(
+                name="ELO",
+                value=f"{current_elo}{elo_change_text}",
+                inline=True
+            )
     
     return embed
 
@@ -242,7 +355,18 @@ async def track_player(ctx, nickname):
             tracked_players[guild_id]["players"][nickname] = player_id
             tracked_players[guild_id]["last_matches"][player_id] = []
             
+            # Initialize player ELO tracking
+            if 'games' in player_data:
+                for game_id, game_data in player_data['games'].items():
+                    if 'faceit_elo' in game_data:
+                        current_elo = game_data['faceit_elo']
+                        if player_id not in player_elo_history:
+                            player_elo_history[player_id] = {"current": current_elo, "history": []}
+                        else:
+                            player_elo_history[player_id]["current"] = current_elo
+            
             save_tracked_players()
+            save_player_elo_history()
             await ctx.send(f"Now tracking FACEIT player: {nickname} (ID: {player_id})")
         else:
             await ctx.send(f"Could not find player with nickname: {nickname}")
