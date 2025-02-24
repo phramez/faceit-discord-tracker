@@ -451,32 +451,114 @@ async def recent_matches(ctx, nickname, count: int = 3):
             else:
                 await ctx.send(f"Konnte Details für Match {match_id} nicht abrufen")
 
+@bot.command(name='addchannel')
+async def add_notification_channel(ctx, channel: discord.TextChannel = None):
+    """Add a channel to receive match notifications
+    Usage: !addchannel [#channel]
+    If no channel is specified, uses the current channel"""
+    guild_id = str(ctx.guild.id)
+    channel = channel or ctx.channel
+    
+    # Initialize server entry if not exists
+    if guild_id not in tracked_players:
+        tracked_players[guild_id] = {
+            "notification_channels": [],
+            "players": {},
+            "last_matches": {}
+        }
+    elif "notification_channels" not in tracked_players[guild_id]:
+        tracked_players[guild_id]["notification_channels"] = []
+    
+    # Check if channel is already registered
+    if str(channel.id) in tracked_players[guild_id]["notification_channels"]:
+        await ctx.send(f"{channel.mention} is already receiving match notifications!")
+        return
+    
+    # Add the channel
+    tracked_players[guild_id]["notification_channels"].append(str(channel.id))
+    save_tracked_players()
+    await ctx.send(f"✅ {channel.mention} will now receive match notifications!")
+
+@bot.command(name='removechannel')
+async def remove_notification_channel(ctx, channel: discord.TextChannel = None):
+    """Remove a channel from receiving match notifications
+    Usage: !removechannel [#channel]
+    If no channel is specified, uses the current channel"""
+    guild_id = str(ctx.guild.id)
+    channel = channel or ctx.channel
+    
+    if (guild_id not in tracked_players or 
+        "notification_channels" not in tracked_players[guild_id] or
+        str(channel.id) not in tracked_players[guild_id]["notification_channels"]):
+        await ctx.send(f"{channel.mention} is not receiving match notifications!")
+        return
+    
+    # Remove the channel
+    tracked_players[guild_id]["notification_channels"].remove(str(channel.id))
+    save_tracked_players()
+    await ctx.send(f"❌ {channel.mention} will no longer receive match notifications!")
+
+@bot.command(name='listchannels')
+async def list_notification_channels(ctx):
+    """List all channels that receive match notifications"""
+    guild_id = str(ctx.guild.id)
+    
+    if (guild_id not in tracked_players or 
+        "notification_channels" not in tracked_players[guild_id] or
+        not tracked_players[guild_id]["notification_channels"]):
+        await ctx.send("No channels are currently receiving match notifications!")
+        return
+    
+    channels = []
+    for channel_id in tracked_players[guild_id]["notification_channels"]:
+        channel = ctx.guild.get_channel(int(channel_id))
+        if channel:
+            channels.append(channel.mention)
+    
+    if channels:
+        await ctx.send("**Channels receiving match notifications:**\n" + "\n".join(channels))
+    else:
+        await ctx.send("No active notification channels found!")
+
 @tasks.loop(minutes=5)
 async def check_match_updates():
-    """Prüfe auf Match-Updates für alle verfolgten Spieler"""
+    """Check for match updates for all tracked players"""
     try:
-        logger.info("Prüfe auf Match-Updates...")
+        logger.info("Checking for match updates...")
         
         async with aiohttp.ClientSession() as session:
             for guild_id, guild_data in tracked_players.items():
-                channel_id = guild_data.get("channel_id")
-                channel = bot.get_channel(int(channel_id)) if channel_id else None
-                
-                if not channel:
-                    logger.warning(f"Konnte den Kanal für Server {guild_id} nicht finden")
+                # Skip if no notification channels are set up
+                if ("notification_channels" not in guild_data or 
+                    not guild_data["notification_channels"]):
                     continue
                 
+                guild = bot.get_guild(int(guild_id))
+                if not guild:
+                    logger.warning(f"Could not find guild {guild_id}")
+                    continue
+                
+                # Get all valid notification channels
+                valid_channels = []
+                for channel_id in guild_data["notification_channels"]:
+                    channel = guild.get_channel(int(channel_id))
+                    if channel:
+                        valid_channels.append(channel)
+                    else:
+                        logger.warning(f"Could not find channel {channel_id} in guild {guild_id}")
+                
+                if not valid_channels:
+                    continue
+                
+                # Check each player's matches
                 for nickname, player_id in guild_data["players"].items():
-                    # Get match history
                     history_data = await fetch_player_history(session, player_id, limit=3)
                     
                     if not history_data or 'items' not in history_data:
-                        logger.warning(f"Konnte Match-Verlauf für Spieler {nickname} nicht abrufen")
+                        logger.warning(f"Could not fetch match history for player {nickname}")
                         continue
                     
                     matches = history_data['items']
-                    
-                    # Check if there are new matches
                     known_match_ids = tracked_players[guild_id]["last_matches"].get(player_id, [])
                     new_match_ids = []
                     
@@ -490,14 +572,20 @@ async def check_match_updates():
                             
                             if match_details and match_details.get('status') == 'FINISHED':
                                 embed = await create_match_embed(match_details, nickname, session)
-                                await channel.send(f"Neues Match-Ergebnis für {nickname}:", embed=embed)
+                                
+                                # Send to all notification channels
+                                for channel in valid_channels:
+                                    try:
+                                        await channel.send(f"New match result for {nickname}:", embed=embed)
+                                    except Exception as e:
+                                        logger.error(f"Error sending to channel {channel.id}: {str(e)}")
                     
                     # Update the known matches
                     tracked_players[guild_id]["last_matches"][player_id] = new_match_ids
             
             save_tracked_players()
     except Exception as e:
-        logger.error(f"Fehler in der Match-Update-Prüfung: {str(e)}")
+        logger.error(f"Error in match update check: {str(e)}")
 
 @check_match_updates.before_loop
 async def before_check_match_updates():
