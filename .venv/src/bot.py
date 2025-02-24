@@ -541,20 +541,27 @@ async def create_group_match_embed(match_data, tracked_players_info, session):
         winning_team = winning_team.replace('faction', 'team')
     round_score = None
     player_teams = {}  # player_id -> team_name
+    tracked_player_teams = set()  # Set to store teams of tracked players
 
     # Get round score and determine team assignments
     for round_data in stats_data['rounds']:
         if 'round_stats' in round_data and 'Score' in round_data['round_stats']:
             round_score = round_data['round_stats']['Score']
             
-            # Map players to their teams
+            # Map players to their teams and track which teams our tracked players are on
             for team_idx, team in enumerate(round_data.get('teams', [])):
                 team_name = f"team{team_idx + 1}"
                 for player in team.get('players', []):
-                    player_teams[player.get('player_id')] = team_name
+                    player_id = player.get('player_id')
+                    player_teams[player_id] = team_name
+                    # Check if this player is one we're tracking
+                    if any(tracked_id == player_id for _, tracked_id in tracked_players_info):
+                        tracked_player_teams.add(team_name)
 
-            # Add round score with win/loss indicator
-            win_indicator = "✅" if winning_team else ":x:"
+            # Determine if majority of tracked players won
+            tracked_players_won = any(team == winning_team for team in tracked_player_teams)
+            win_indicator = "✅" if tracked_players_won else "❌"
+            
             embed.add_field(
                 name="Runden",
                 value=f"{round_score} {win_indicator}",
