@@ -520,6 +520,173 @@ async def list_notification_channels(ctx):
     else:
         await ctx.send("No active notification channels found!")
 
+async def create_group_match_embed(match_data, tracked_players_info, session):
+    """
+    Create an embed for matches with 3+ tracked players
+    tracked_players_info is a list of tuples (nickname, player_id)
+    """
+    match_id = match_data.get('match_id')
+    
+    # Get match stats
+    stats_data = await fetch_match_stats(session, match_id)
+    if not stats_data or 'rounds' not in stats_data:
+        return None
+
+    # Create embed
+    embed = discord.Embed(
+        title="🎮 Team Game!",
+        url=match_data.get('faceit_url', '').replace('{lang}', 'de'),
+        color=discord.Color.gold()
+    )
+
+    # Add match times
+    finished_at = format_time(match_data.get('finished_at'))
+    embed.add_field(
+        name="Beendet", 
+        value=finished_at if match_data.get('finished_at') else "Läuft noch", 
+        inline=True
+    )
+
+    # Get round score
+    for round_data in stats_data['rounds']:
+        if 'round_stats' in round_data and 'Score' in round_data['round_stats']:
+            embed.add_field(
+                name="Runden",
+                value=round_data['round_stats']['Score'],
+                inline=True
+            )
+            break
+
+    # Track ELO changes and performance for group summary
+    player_performances = []
+    total_elo_change = 0
+    players_with_elo_change = 0
+
+    # Create performance table
+    performance_text = "```\nSpieler        K   D   K/D   ELO  Δ\n" + "-" * 40 + "\n"
+
+    for round_data in stats_data['rounds']:
+        for team in round_data.get('teams', []):
+            for player_stats in team.get('players', []):
+                player_name = player_stats.get('nickname', '')
+                player_id = player_stats.get('player_id', '')
+
+                # Check if this is a tracked player
+                if any(p[0].lower() == player_name.lower() for p in tracked_players_info):
+                    stats = player_stats.get('player_stats', {})
+                    kills = int(stats.get('Kills', 0))
+                    deaths = int(stats.get('Deaths', 1))  # Use 1 to avoid division by zero
+                    kd_ratio = round(kills / deaths, 2)
+
+                    # Get ELO change
+                    current_elo, elo_history = await update_player_elo(session, player_id)
+                    elo_change = 0
+                    if elo_history and len(elo_history) > 0:
+                        elo_change = elo_history[-1].get('change', 0)
+                        total_elo_change += elo_change
+                        players_with_elo_change += 1
+
+                    # Format performance line
+                    performance_text += f"{player_name:<12} {kills:>3} {deaths:>3} {kd_ratio:>5} {current_elo:>5} {elo_change:>+3}\n"
+
+    performance_text += "```"
+    embed.add_field(name="Team Performance", value=performance_text, inline=False)
+
+    # Add average ELO change if we have data
+    if players_with_elo_change > 0:
+        avg_elo_change = round(total_elo_change / players_with_elo_change, 1)
+        embed.add_field(
+            name="Durchschnittliche ELO-Änderung",
+            value=f"{avg_elo_change:+.1f}",
+            inline=True
+        )
+
+    return embed
+
+@bot.command(name='grouphistory')
+async def group_history(ctx, count: int = 5):
+    """Show recent matches where 3+ tracked players played together
+    Usage: !grouphistory [number_of_matches]
+    Default is 5 matches, maximum is 10"""
+    
+    # Limit the count to prevent abuse
+    if count > 10:
+        count = 10
+        await ctx.send("Maximum number of matches is 10. Showing 10 most recent matches.")
+    
+    guild_id = str(ctx.guild.id)
+    if guild_id not in tracked_players or not tracked_players[guild_id]["players"]:
+        await ctx.send("No players are being tracked in this server.")
+        return
+
+    await ctx.send("🔍 Searching for group matches... This might take a moment.")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Dictionary to store all matches: match_id -> {players: [], timestamp: int}
+            all_matches = {}
+            
+            # Collect matches from all tracked players
+            for nickname, player_id in tracked_players[guild_id]["players"].items():
+                history_data = await fetch_player_history(session, player_id, limit=20)  # Get more matches to find overlaps
+                
+                if not history_data or 'items' not in history_data:
+                    continue
+                
+                for match in history_data['items']:
+                    match_id = match.get('match_id')
+                    match_timestamp = match.get('finished_at', 0)
+                    
+                    if match_id not in all_matches:
+                        all_matches[match_id] = {
+                            'players': [],
+                            'timestamp': match_timestamp,
+                            'match_data': match
+                        }
+                    
+                    all_matches[match_id]['players'].append((nickname, player_id))
+
+            # Filter matches with 3+ players and sort by timestamp
+            group_matches = {
+                match_id: data 
+                for match_id, data in all_matches.items() 
+                if len(data['players']) >= 3
+            }
+            
+            sorted_matches = sorted(
+                group_matches.items(),
+                key=lambda x: x[1]['timestamp'],
+                reverse=True
+            )[:count]
+
+            if not sorted_matches:
+                await ctx.send("No group matches found with 3 or more tracked players.")
+                return
+
+            # Process each group match
+            for match_id, match_info in sorted_matches:
+                match_details = await fetch_match_details(session, match_id)
+                if not match_details:
+                    continue
+
+                group_embed = await create_group_match_embed(
+                    match_details,
+                    match_info['players'],
+                    session
+                )
+                
+                if group_embed:
+                    match_time = format_time(match_info['timestamp'])
+                    await ctx.send(
+                        f"📅 **Team Game am {match_time}** "
+                        f"mit {len(match_info['players'])} geilen Gamern:",
+                        embed=group_embed
+                    )
+
+    except Exception as e:
+        logger.error(f"Error fetching group history: {str(e)}")
+        await ctx.send("❌ An error occurred while fetching group match history.")
+
 @tasks.loop(minutes=5)
 async def check_match_updates():
     """Check for match updates for all tracked players"""
@@ -544,45 +711,69 @@ async def check_match_updates():
                     channel = guild.get_channel(int(channel_id))
                     if channel:
                         valid_channels.append(channel)
-                    else:
-                        logger.warning(f"Could not find channel {channel_id} in guild {guild_id}")
                 
                 if not valid_channels:
                     continue
+
+                # Track matches that have multiple tracked players
+                group_matches = {}  # match_id -> list of (nickname, player_id)
                 
-                # Check each player's matches
+                # First pass: collect all matches and their players
                 for nickname, player_id in guild_data["players"].items():
                     history_data = await fetch_player_history(session, player_id, limit=3)
                     
                     if not history_data or 'items' not in history_data:
-                        logger.warning(f"Could not fetch match history for player {nickname}")
                         continue
                     
-                    matches = history_data['items']
-                    known_match_ids = tracked_players[guild_id]["last_matches"].get(player_id, [])
-                    new_match_ids = []
-                    
-                    for match in matches:
+                    for match in history_data['items']:
                         match_id = match.get('match_id')
-                        new_match_ids.append(match_id)
-                        
-                        # If this is a new match
-                        if match_id not in known_match_ids:
-                            match_details = await fetch_match_details(session, match_id)
-                            
-                            if match_details and match_details.get('status') == 'FINISHED':
-                                embed = await create_match_embed(match_details, nickname, session)
-                                
-                                # Send to all notification channels
-                                for channel in valid_channels:
-                                    try:
-                                        await channel.send(f"New match result for {nickname}:", embed=embed)
-                                    except Exception as e:
-                                        logger.error(f"Error sending to channel {channel.id}: {str(e)}")
-                    
-                    # Update the known matches
-                    tracked_players[guild_id]["last_matches"][player_id] = new_match_ids
-            
+                        if match_id not in group_matches:
+                            group_matches[match_id] = []
+                        group_matches[match_id].append((nickname, player_id))
+
+                # Second pass: process matches
+                for match_id, players in group_matches.items():
+                    # Skip if we've already processed this match
+                    if any(match_id in tracked_players[guild_id]["last_matches"].get(pid, [])
+                         for _, pid in players):
+                        continue
+
+                    match_details = await fetch_match_details(session, match_id)
+                    if not match_details or match_details.get('status') != 'FINISHED':
+                        continue
+
+                    # For matches with 3+ tracked players, create special group embed
+                    if len(players) >= 3:
+                        group_embed = await create_group_match_embed(
+                            match_details, 
+                            players,
+                            session
+                        )
+                        if group_embed:
+                            for channel in valid_channels:
+                                try:
+                                    await channel.send(
+                                        f"🎮 **Gruppenspiel gefunden mit {len(players)} Spielern!**",
+                                        embed=group_embed
+                                    )
+                                except Exception as e:
+                                    logger.error(f"Error sending to channel {channel.id}: {str(e)}")
+                    else:
+                        # Regular match processing for matches with 1-2 players
+                        for nickname, player_id in players:
+                            embed = await create_match_embed(match_details, nickname, session)
+                            for channel in valid_channels:
+                                try:
+                                    await channel.send(f"New match result for {nickname}:", embed=embed)
+                                except Exception as e:
+                                    logger.error(f"Error sending to channel {channel.id}: {str(e)}")
+
+                    # Update last matches for all players in this match
+                    for _, player_id in players:
+                        if player_id not in tracked_players[guild_id]["last_matches"]:
+                            tracked_players[guild_id]["last_matches"][player_id] = []
+                        tracked_players[guild_id]["last_matches"][player_id].append(match_id)
+
             save_tracked_players()
     except Exception as e:
         logger.error(f"Error in match update check: {str(e)}")
