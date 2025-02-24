@@ -173,7 +173,6 @@ def format_time(timestamp):
         return dt.strftime("%d.%m, %H:%M Uhr")
     return "Unbekannte Zeit"
 
-# Create an embed for match details with stats
 async def create_match_embed(match_data, player_nickname, session):
     match_id = match_data.get('match_id')
     game = match_data.get('game', 'Unknown Game')
@@ -182,81 +181,66 @@ async def create_match_embed(match_data, player_nickname, session):
     # Get match teams and results
     teams = match_data.get('teams', {})
     results = match_data.get('results', {})
+    winning_team = results.get('winner', '')
     
-    # Fix the match URL
-    faceit_url = match_data.get('faceit_url', '')
-    if faceit_url:
-        # Replace the {lang} placeholder with 'de'
-        faceit_url = faceit_url.replace('{lang}', 'de')
-        # Add /scoreboard if it doesn't already have it and if it contains 'room/'
-        if 'room/' in faceit_url and not faceit_url.endswith('/scoreboard'):
-            faceit_url = faceit_url + '/scoreboard'
-    else:
-        faceit_url = 'https://www.faceit.com'
-    
-    # Create embed
+    # Create embed and handle winning team conversion
+    winning_team = results.get('winner', '')
+    if winning_team.startswith('faction'):
+        winning_team = winning_team.replace('faction', 'team')
+        
     embed = discord.Embed(
         title=f"Match Ergebnis",
-        url=faceit_url,
+        url=match_data.get('faceit_url', '').replace('{lang}', 'de'),
         color=discord.Color.blue()
     )
     
     # Add match times
     finished_at = format_time(match_data.get('finished_at'))
-    embed.add_field(name="Beendet", value=finished_at if match_data.get('finished_at') else "Läuft noch", inline=True)
+    embed.add_field(
+        name="Beendet", 
+        value=finished_at if match_data.get('finished_at') else "Läuft noch", 
+        inline=True
+    )
     
-    # Get match stats to find player performance and detailed round score
+    # Get match stats
     stats_data = await fetch_match_stats(session, match_id)
-    detailed_round_score = None
-    player_id = None
     player_team = None
-    rounds_played = 0
-    win_status = "❓"  # Default unknown status
     
     if stats_data and 'rounds' in stats_data:
-        # Get detailed round score
         for round_data in stats_data['rounds']:
             if 'round_stats' in round_data and 'Score' in round_data['round_stats']:
-                detailed_round_score = round_data['round_stats']['Score']
-                embed.add_field(name="Runden", value=detailed_round_score, inline=True)
+                round_score = round_data['round_stats']['Score']
                 
-                # Parse the round score safely to get the total rounds played
-                try:
-                    # Handle different score formats (e.g., "13:10" or "13 / 10")
-                    if ':' in detailed_round_score:
-                        score_parts = detailed_round_score.split(':')
-                    elif '/' in detailed_round_score:
-                        score_parts = detailed_round_score.split('/')
-                    else:
-                        score_parts = detailed_round_score.split()  # Split by whitespace
-                    
-                    # Extract numerical values
-                    score_values = []
-                    for part in score_parts:
-                        # Extract digits only
-                        digits = ''.join(filter(str.isdigit, part))
-                        if digits:
-                            score_values.append(int(digits))
-                    
-                    if len(score_values) >= 2:
-                        rounds_played = sum(score_values[:2])  # Take the first two scores
-                except Exception as e:
-                    logger.error(f"Error parsing round score: {e}")
-                    rounds_played = 0  # Default if parsing fails
+                # Find player's team
+                for team_idx, team in enumerate(round_data.get('teams', [])):
+                    for player in team.get('players', []):
+                        if player.get('nickname', '').lower() == player_nickname.lower():
+                            player_team = f"team{team_idx + 1}"
+                            break
+                    if player_team:
+                        break
                 
+                # Add win/loss indicator to round score
+                win_indicator = "✅" if (winning_team == player_team) else "❌"
+                embed.add_field(
+                    name="Runden",
+                    value=f"{round_score} {win_indicator}",
+                    inline=True
+                )
                 break
                 
+
+        
         # Find our player and their stats
         player_found = False
         for round_data in stats_data['rounds']:
-            for team_index, team in enumerate(round_data.get('teams', [])):
+            for team in round_data.get('teams', []):
                 for player_stats in team.get('players', []):
                     player_name = player_stats.get('nickname', '')
                     
                     if player_name.lower() == player_nickname.lower():
                         player_found = True
                         player_id = player_stats.get('player_id')
-                        player_team = f"team{team_index + 1}"  # team1 or team2
                         stats = player_stats.get('player_stats', {})
                         
                         # Add player stats to embed
@@ -288,18 +272,15 @@ async def create_match_embed(match_data, player_nickname, session):
                             ),
                             inline=False
                         )
-                        
-                        # Break out once we found our player
                         break
                 if player_found:
                     break
             if player_found:
                 break
     
-    # Determine if player won or lost
-    if player_team and results and 'winner' in results:
-        winner = results.get('winner')
-        if winner == player_team or winner == player_team.replace('team', 'faction'):
+    # Set embed color based on win/loss
+    if player_team and winning_team:
+        if winning_team == player_team:
             win_status = "✅ Easy Win"
             embed.color = discord.Color.green()
         else:
@@ -314,14 +295,20 @@ async def create_match_embed(match_data, player_nickname, session):
         current_elo, elo_history = await update_player_elo(session, player_id, game)
         
         if current_elo:
-            # Find the most recent ELO change if any
+            # Find the most recent ELO change
             elo_change_text = ""
             if elo_history and len(elo_history) > 0:
                 last_change = elo_history[-1]
                 change = last_change.get('change', 0)
+                # Ensure ELO change matches win/loss status
+                if winning_team == player_team:
+                    change = abs(change)
+                else:
+                    change = -abs(change)
+                
                 if change > 0:
                     elo_change_text = f" (+{change})"
-                elif change < 0:
+                else:
                     elo_change_text = f" ({change})"
             
             embed.add_field(
@@ -534,7 +521,7 @@ async def create_group_match_embed(match_data, tracked_players_info, session):
 
     # Create embed
     embed = discord.Embed(
-        title="🎮 Team Game!",
+        title="🎮 Group Match Detected!",
         url=match_data.get('faceit_url', '').replace('{lang}', 'de'),
         color=discord.Color.gold()
     )
@@ -547,20 +534,39 @@ async def create_group_match_embed(match_data, tracked_players_info, session):
         inline=True
     )
 
-    # Get round score
+    # Initialize variables for tracking wins and team assignments
+    winning_team = match_data.get('results', {}).get('winner', '')
+    # Handle both team and faction naming
+    if winning_team.startswith('faction'):
+        winning_team = winning_team.replace('faction', 'team')
+    round_score = None
+    player_teams = {}  # player_id -> team_name
+
+    # Get round score and determine team assignments
     for round_data in stats_data['rounds']:
         if 'round_stats' in round_data and 'Score' in round_data['round_stats']:
+            round_score = round_data['round_stats']['Score']
+            
+            # Map players to their teams
+            for team_idx, team in enumerate(round_data.get('teams', [])):
+                team_name = f"team{team_idx + 1}"
+                for player in team.get('players', []):
+                    player_teams[player.get('player_id')] = team_name
+
+            # Add round score with win/loss indicator
+            win_indicator = "✅" if winning_team else ":x:"
             embed.add_field(
                 name="Runden",
-                value=round_data['round_stats']['Score'],
+                value=f"{round_score} {win_indicator}",
                 inline=True
             )
             break
 
     # Track ELO changes and performance for group summary
     player_performances = []
+    total_elo = 0
     total_elo_change = 0
-    players_with_elo_change = 0
+    players_with_elo = 0
 
     # Create performance table
     performance_text = "```\nSpieler        K   D   K/D   ELO  Δ\n" + "-" * 40 + "\n"
@@ -582,9 +588,19 @@ async def create_group_match_embed(match_data, tracked_players_info, session):
                     current_elo, elo_history = await update_player_elo(session, player_id)
                     elo_change = 0
                     if elo_history and len(elo_history) > 0:
-                        elo_change = elo_history[-1].get('change', 0)
-                        total_elo_change += elo_change
-                        players_with_elo_change += 1
+                        # Get the correct ELO change based on player's team and match winner
+                        player_team = player_teams.get(player_id, '')
+                        if player_team and winning_team:
+                            elo_change = elo_history[-1].get('change', 0)
+                            # Invert ELO change if player was on losing team
+                            if player_team != winning_team:
+                                elo_change = -abs(elo_change)
+                            else:
+                                elo_change = abs(elo_change)
+                            
+                            total_elo_change += elo_change
+                            total_elo += current_elo
+                            players_with_elo += 1
 
                     # Format performance line
                     performance_text += f"{player_name:<12} {kills:>3} {deaths:>3} {kd_ratio:>5} {current_elo:>5} {elo_change:>+3}\n"
@@ -593,15 +609,25 @@ async def create_group_match_embed(match_data, tracked_players_info, session):
     embed.add_field(name="Team Performance", value=performance_text, inline=False)
 
     # Add average ELO change if we have data
-    if players_with_elo_change > 0:
-        avg_elo_change = round(total_elo_change / players_with_elo_change, 1)
+    if players_with_elo > 0:
+        avg_elo_change = round(total_elo_change / players_with_elo, 1)
+        avg_current_elo = round(total_elo / players_with_elo, 1)
+        
         embed.add_field(
             name="Durchschnittliche ELO-Änderung",
             value=f"{avg_elo_change:+.1f}",
             inline=True
         )
+        
+        embed.add_field(
+            name="Durchschnittliche ELO",
+            value=f"{avg_current_elo:.1f}",
+            inline=True
+        )
 
     return embed
+
+
 
 @bot.command(name='grouphistory')
 async def group_history(ctx, count: int = 5):
@@ -764,7 +790,7 @@ async def check_match_updates():
                             embed = await create_match_embed(match_details, nickname, session)
                             for channel in valid_channels:
                                 try:
-                                    await channel.send(f"New match result for {nickname}:", embed=embed)
+                                    await channel.send(f"Neues Match-Ergebnis für {nickname}:", embed=embed)
                                 except Exception as e:
                                     logger.error(f"Error sending to channel {channel.id}: {str(e)}")
 
