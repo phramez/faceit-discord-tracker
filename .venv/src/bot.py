@@ -547,6 +547,11 @@ async def create_group_match_embed(match_data, tracked_players_info, session):
     for round_data in stats_data['rounds']:
         if 'round_stats' in round_data and 'Score' in round_data['round_stats']:
             round_score = round_data['round_stats']['Score']
+            # Calculate total rounds from the score (e.g., "13 / 6" -> 19 rounds)
+            if round_score:
+                scores = round_score.split('/')
+                if len(scores) == 2:
+                    total_rounds = sum(int(score.strip()) for score in scores)
             
             # Map players to their teams and track which teams our tracked players are on
             for team_idx, team in enumerate(round_data.get('teams', [])):
@@ -562,8 +567,15 @@ async def create_group_match_embed(match_data, tracked_players_info, session):
             tracked_players_won = any(team == winning_team for team in tracked_player_teams)
             win_indicator = "✅" if tracked_players_won else "❌"
             
+            map_name = round_data['round_stats'].get('Map', 'Unknown Map')
             embed.add_field(
-                name="Runden",
+                name="Map",
+                value=f"{map_name}",
+                inline=True
+            )
+            
+            embed.add_field(
+                name="Score",
                 value=f"{round_score} {win_indicator}",
                 inline=True
             )
@@ -571,13 +583,10 @@ async def create_group_match_embed(match_data, tracked_players_info, session):
 
     # Track ELO changes and performance for group summary
     player_performances = []
-    total_elo = 0
-    total_elo_change = 0
-    players_with_elo = 0
-
-    # Create performance table
-    performance_text = "```\nSpieler        K   D   K/D   ELO  Δ\n" + "-" * 40 + "\n"
-
+    
+    # Collect all player stats first for sorting
+    all_player_stats = []
+    
     for round_data in stats_data['rounds']:
         for team in round_data.get('teams', []):
             for player_stats in team.get('players', []):
@@ -587,54 +596,72 @@ async def create_group_match_embed(match_data, tracked_players_info, session):
                 # Check if this is a tracked player
                 if any(p[0].lower() == player_name.lower() for p in tracked_players_info):
                     stats = player_stats.get('player_stats', {})
+                    
+                    # Calculate multi-kills
+                    multi_kills = (
+                        int(stats.get('Double Kills', 0)) +
+                        int(stats.get('Triple Kills', 0)) +
+                        int(stats.get('Quadro Kills', 0)) +
+                        int(stats.get('Penta Kills', 0))
+                    )
+                    
+                    # Get all stats
                     kills = int(stats.get('Kills', 0))
-                    deaths = int(stats.get('Deaths', 1))  # Use 1 to avoid division by zero
+                    deaths = int(stats.get('Deaths', 1))
+                    assists = int(stats.get('Assists', 0))
                     kd_ratio = round(kills / deaths, 2)
-
-                    # Get ELO change
+                    adr = float(stats.get('ADR', 0))
+                    utility_dmg = int(stats.get('Utility Damage', 0))
+                    
+                    # Get ELO info
                     current_elo, elo_history = await update_player_elo(session, player_id)
                     elo_change = 0
                     if elo_history and len(elo_history) > 0:
-                        # Get the correct ELO change based on player's team and match winner
                         player_team = player_teams.get(player_id, '')
                         if player_team and winning_team:
                             elo_change = elo_history[-1].get('change', 0)
-                            # Invert ELO change if player was on losing team
                             if player_team != winning_team:
                                 elo_change = -abs(elo_change)
                             else:
                                 elo_change = abs(elo_change)
-                            
-                            total_elo_change += elo_change
-                            total_elo += current_elo
-                            players_with_elo += 1
+                    
+                    # Store all stats for sorting
+                    all_player_stats.append({
+                        'name': player_name,
+                        'kills': kills,
+                        'deaths': deaths,
+                        'assists': assists,
+                        'kd': kd_ratio,
+                        'adr': adr,
+                        'multi_kills': multi_kills,
+                        'utility_dmg': utility_dmg,
+                        'elo': current_elo,
+                        'elo_change': elo_change
+                    })
 
-                    # Format performance line
-                    performance_text += f"{player_name:<12} {kills:>3} {deaths:>3} {kd_ratio:>5} {current_elo:>5} {elo_change:>+3}\n"
+    # Sort players by ADR
+    all_player_stats.sort(key=lambda x: x['adr'], reverse=True)
 
-    performance_text += "```"
-    embed.add_field(name="Team Performance", value=performance_text, inline=False)
+    # Create performance table with two sections
+    performance_text = "```\nSpieler        K    D    A    K/D   ADR   MKs  UTIL   ELO   Δ\n" + "-" * 65 + "\n"
 
-    # Add average ELO change if we have data
-    if players_with_elo > 0:
-        avg_elo_change = round(total_elo_change / players_with_elo, 1)
-        avg_current_elo = round(total_elo / players_with_elo, 1)
-        
-        embed.add_field(
-            name="Durchschnittliche ELO-Änderung",
-            value=f"{avg_elo_change:+.1f}",
-            inline=True
-        )
-        
-        embed.add_field(
-            name="Durchschnittliche ELO",
-            value=f"{avg_current_elo:.1f}",
-            inline=True
-        )
+    for player in all_player_stats:
+        # Format each stat
+        kills_str = str(player['kills'])
+        deaths_str = str(player['deaths'])
+        assists_str = str(player['assists'])
+        kd_str = f"{player['kd']:.2f}"
+        adr_str = f"{player['adr']:.1f}"
+        mk_str = str(player['multi_kills'])
+        util_str = str(player['utility_dmg'])
+        elo_str = str(player['elo']) if player['elo'] else "N/A"
+        elo_change_str = f"{player['elo_change']:+d}" if player['elo_change'] else "N/A"
+
+        # Add player line to table
+        performance_text += f"{player['name']:<12} {kills_str:>3}  {deaths_str:>3}  {assists_str:>3}  {kd_str:>5}  {adr_str:>5}  {mk_str:>3}  {util_str:>4}  {elo_str:>5} {elo_change_str:>4}\n"
+
 
     return embed
-
-
 
 @bot.command(name='grouphistory')
 async def group_history(ctx, count: int = 5):
