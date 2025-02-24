@@ -834,14 +834,14 @@ def create_scoreboard_image(match_data: Dict) -> io.BytesIO:
                 text = '-'
             draw.text((x, y + 8), text, font=regular_font, fill=color, align='center')
 
-        # Draw legend
-        legend_y = total_height - 30
-        draw.text(
-            (PADDING, legend_y),
-            "MKs = Multi Kills (Double + Triple + Quadro + Penta)  |  UTIL = Utility Damage",
-            font=small_font,
-            fill='#99AAB5'
-        )
+        # # Draw legend
+        # legend_y = total_height - 30
+        # draw.text(
+        #     (PADDING, legend_y),
+        #     "MKs = Multi Kills (Double + Triple + Quadro + Penta)  |  UTIL = Utility Damage",
+        #     font=small_font,
+        #     fill='#99AAB5'
+        # )
 
         # Convert to bytes
         byte_array = io.BytesIO()
