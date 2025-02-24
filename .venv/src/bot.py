@@ -7,6 +7,9 @@ from datetime import datetime
 import json
 import logging
 from dotenv import load_dotenv
+from PIL import Image, ImageDraw, ImageFont
+import io
+from typing import List, Dict
 
 # Load environment variables from .env file
 load_dotenv()
@@ -509,8 +512,9 @@ async def list_notification_channels(ctx):
 
 async def create_group_match_embed(match_data, tracked_players_info, session):
     """
-    Create an embed for matches with 3+ tracked players
+    Create an embed and React component data for matches with 3+ tracked players
     tracked_players_info is a list of tuples (nickname, player_id)
+    Returns a dict with 'embed' and 'react_data' keys
     """
     match_id = match_data.get('match_id')
     
@@ -519,157 +523,139 @@ async def create_group_match_embed(match_data, tracked_players_info, session):
     if not stats_data or 'rounds' not in stats_data:
         return None
 
-    # Create embed
+    # Process match data
+    round_data = stats_data['rounds'][0]  # Get first round data
+    map_name = round_data['round_stats'].get('Map', 'Unknown Map')
+    score = round_data['round_stats'].get('Score', '0 / 0')
+    winning_team = match_data.get('results', {}).get('winner', '')
+    
+    # Handle both team and faction naming
+    if winning_team.startswith('faction'):
+        winning_team = winning_team.replace('faction', 'team')
+
+    # Initialize tracking variables
+    player_teams = {}
+    tracked_player_teams = set()
+    all_player_stats = []
+
+    # Process teams and players
+    for team_idx, team in enumerate(round_data.get('teams', [])):
+        team_name = f"team{team_idx + 1}"
+        for player in team.get('players', []):
+            player_id = player.get('player_id', '')
+            player_name = player.get('nickname', '')
+            
+            # Check if this is a tracked player
+            if any(p[0].lower() == player_name.lower() for p in tracked_players_info):
+                player_teams[player_id] = team_name
+                tracked_player_teams.add(team_name)
+                
+                stats = player.get('player_stats', {})
+                
+                # Get ELO info
+                current_elo, elo_history = await update_player_elo(session, player_id)
+                elo_change = 0
+                if elo_history and len(elo_history) > 0:
+                    if team_name == winning_team:
+                        elo_change = abs(elo_history[-1].get('change', 0))
+                    else:
+                        elo_change = -abs(elo_history[-1].get('change', 0))
+
+                # Calculate multi-kills
+                multi_kills = (
+                    int(stats.get('Double Kills', 0)) +
+                    int(stats.get('Triple Kills', 0)) +
+                    int(stats.get('Quadro Kills', 0)) +
+                    int(stats.get('Penta Kills', 0))
+                )
+
+                # Prepare player stats
+                player_data = {
+                    'name': player_name,
+                    'kills': int(stats.get('Kills', 0)),
+                    'deaths': int(stats.get('Deaths', 0)),
+                    'assists': int(stats.get('Assists', 0)),
+                    'kd': float(stats.get('K/D Ratio', 0)),
+                    'adr': float(stats.get('ADR', 0)),
+                    'multiKills': multi_kills,
+                    'utilityDmg': int(stats.get('Utility Damage', 0)),
+                    'elo': current_elo,
+                    'eloChange': elo_change
+                }
+                all_player_stats.append(player_data)
+
+    # Sort players by ADR
+    all_player_stats.sort(key=lambda x: x['adr'], reverse=True)
+
+    # Create Discord embed
     embed = discord.Embed(
         title="🎮 Group Match Detected!",
         url=match_data.get('faceit_url', '').replace('{lang}', 'de'),
         color=discord.Color.gold()
     )
 
-    # Add match times
+    # Add match info to embed
     finished_at = format_time(match_data.get('finished_at'))
     embed.add_field(
-        name="Beendet", 
-        value=finished_at if match_data.get('finished_at') else "Läuft noch", 
+        name="Time", 
+        value=finished_at if match_data.get('finished_at') else "In Progress", 
         inline=True
     )
+    embed.add_field(name="Map", value=map_name, inline=True)
+    embed.add_field(name="Score", value=score, inline=True)
 
-    # Initialize variables for tracking wins and team assignments
-    winning_team = match_data.get('results', {}).get('winner', '')
-    # Handle both team and faction naming
-    if winning_team.startswith('faction'):
-        winning_team = winning_team.replace('faction', 'team')
-    round_score = None
-    player_teams = {}  # player_id -> team_name
-    tracked_player_teams = set()  # Set to store teams of tracked players
+    # Prepare React component data
+    react_data = {
+        'map': map_name,
+        'score': score,
+        'finishedAt': finished_at,
+        'players': all_player_stats
+    }
 
-    # Get round score and determine team assignments
-    for round_data in stats_data['rounds']:
-        if 'round_stats' in round_data and 'Score' in round_data['round_stats']:
-            round_score = round_data['round_stats']['Score']
-            # Calculate total rounds from the score (e.g., "13 / 6" -> 19 rounds)
-            if round_score:
-                scores = round_score.split('/')
-                if len(scores) == 2:
-                    total_rounds = sum(int(score.strip()) for score in scores)
+    return {
+        'embed': embed,
+        'react_data': react_data
+    }
+
+
+async def send_group_match_message(ctx, match_details, match_info, session):
+    """
+    Sends a group match message with both embed and scoreboard image
+    """
+    try:
+        result = await create_group_match_embed(
+            match_details,
+            match_info['players'],
+            session
+        )
+        
+        if result:
+            match_time = format_time(match_info['timestamp'])
             
-            # Map players to their teams and track which teams our tracked players are on
-            for team_idx, team in enumerate(round_data.get('teams', [])):
-                team_name = f"team{team_idx + 1}"
-                for player in team.get('players', []):
-                    player_id = player.get('player_id')
-                    player_teams[player_id] = team_name
-                    # Check if this player is one we're tracking
-                    if any(tracked_id == player_id for _, tracked_id in tracked_players_info):
-                        tracked_player_teams.add(team_name)
-
-            # Determine if majority of tracked players won
-            tracked_players_won = any(team == winning_team for team in tracked_player_teams)
-            win_indicator = "✅" if tracked_players_won else "❌"
+            # Create the scoreboard image
+            image_bytes = create_scoreboard_image(result['react_data'])
             
-            map_name = round_data['round_stats'].get('Map', 'Unknown Map')
-            embed.add_field(
-                name="Map",
-                value=f"{map_name}",
-                inline=True
+            # Create the file object for Discord
+            discord_file = discord.File(
+                fp=image_bytes,
+                filename='scoreboard.png'
             )
             
-            embed.add_field(
-                name="Score",
-                value=f"{round_score} {win_indicator}",
-                inline=True
+            # Send the message with embed and image
+            await ctx.send(
+                f"📅 **Team Game on {match_time}** "
+                f"with {len(match_info['players'])} players:",
+                file=discord_file,
+                embed=result['embed']
             )
-            break
-
-    # Track ELO changes and performance for group summary
-    player_performances = []
-    
-    # Collect all player stats first for sorting
-    all_player_stats = []
-    
-    for round_data in stats_data['rounds']:
-        for team in round_data.get('teams', []):
-            for player_stats in team.get('players', []):
-                player_name = player_stats.get('nickname', '')
-                player_id = player_stats.get('player_id', '')
-
-                # Check if this is a tracked player
-                if any(p[0].lower() == player_name.lower() for p in tracked_players_info):
-                    stats = player_stats.get('player_stats', {})
-                    
-                    # Calculate multi-kills
-                    multi_kills = (
-                        int(stats.get('Double Kills', 0)) +
-                        int(stats.get('Triple Kills', 0)) +
-                        int(stats.get('Quadro Kills', 0)) +
-                        int(stats.get('Penta Kills', 0))
-                    )
-                    
-                    # Get all stats
-                    kills = int(stats.get('Kills', 0))
-                    deaths = int(stats.get('Deaths', 1))
-                    assists = int(stats.get('Assists', 0))
-                    kd_ratio = round(kills / deaths, 2)
-                    adr = float(stats.get('ADR', 0))
-                    utility_dmg = int(stats.get('Utility Damage', 0))
-                    
-                    # Get ELO info
-                    current_elo, elo_history = await update_player_elo(session, player_id)
-                    elo_change = 0
-                    if elo_history and len(elo_history) > 0:
-                        player_team = player_teams.get(player_id, '')
-                        if player_team and winning_team:
-                            elo_change = elo_history[-1].get('change', 0)
-                            if player_team != winning_team:
-                                elo_change = -abs(elo_change)
-                            else:
-                                elo_change = abs(elo_change)
-                    
-                    # Store all stats for sorting
-                    all_player_stats.append({
-                        'name': player_name,
-                        'kills': kills,
-                        'deaths': deaths,
-                        'assists': assists,
-                        'kd': kd_ratio,
-                        'adr': adr,
-                        'multi_kills': multi_kills,
-                        'utility_dmg': utility_dmg,
-                        'elo': current_elo,
-                        'elo_change': elo_change
-                    })
-
-    # Sort players by ADR
-    all_player_stats.sort(key=lambda x: x['adr'], reverse=True)
-
-    # Create performance table with two sections
-    performance_text = "```\nSpieler        K    D    A    K/D   ADR   MKs  UTIL   ELO   Δ\n" + "-" * 65 + "\n"
-
-    for player in all_player_stats:
-        # Format each stat
-        kills_str = str(player['kills'])
-        deaths_str = str(player['deaths'])
-        assists_str = str(player['assists'])
-        kd_str = f"{player['kd']:.2f}"
-        adr_str = f"{player['adr']:.1f}"
-        mk_str = str(player['multi_kills'])
-        util_str = str(player['utility_dmg'])
-        elo_str = str(player['elo']) if player['elo'] else "N/A"
-        elo_change_str = f"{player['elo_change']:+d}" if player['elo_change'] else "N/A"
-
-        # Add player line to table
-        performance_text += f"{player['name']:<12} {kills_str:>3}  {deaths_str:>3}  {assists_str:>3}  {kd_str:>5}  {adr_str:>5}  {mk_str:>3}  {util_str:>4}  {elo_str:>5} {elo_change_str:>4}\n"
-
-
-    return embed
+            
+    except Exception as e:
+        logger.error(f"Error sending group match message: {str(e)}")
+        await ctx.send("❌ An error occurred while creating the match visualization.")
 
 @bot.command(name='grouphistory')
 async def group_history(ctx, count: int = 5):
-    """Show recent matches where 3+ tracked players played together
-    Usage: !grouphistory [number_of_matches]
-    Default is 5 matches, maximum is 10"""
-    
-    # Limit the count to prevent abuse
+    """Show recent matches where 3+ tracked players played together"""
     if count > 10:
         count = 10
         await ctx.send("Maximum number of matches is 10. Showing 10 most recent matches.")
@@ -683,12 +669,12 @@ async def group_history(ctx, count: int = 5):
 
     try:
         async with aiohttp.ClientSession() as session:
-            # Dictionary to store all matches: match_id -> {players: [], timestamp: int}
+            # Collect all matches
             all_matches = {}
             
-            # Collect matches from all tracked players
+            # Get matches for each tracked player
             for nickname, player_id in tracked_players[guild_id]["players"].items():
-                history_data = await fetch_player_history(session, player_id, limit=20)  # Get more matches to find overlaps
+                history_data = await fetch_player_history(session, player_id, limit=20)
                 
                 if not history_data or 'items' not in history_data:
                     continue
@@ -706,7 +692,7 @@ async def group_history(ctx, count: int = 5):
                     
                     all_matches[match_id]['players'].append((nickname, player_id))
 
-            # Filter matches with 3+ players and sort by timestamp
+            # Filter and sort matches
             group_matches = {
                 match_id: data 
                 for match_id, data in all_matches.items() 
@@ -723,29 +709,155 @@ async def group_history(ctx, count: int = 5):
                 await ctx.send("No group matches found with 3 or more tracked players.")
                 return
 
-            # Process each group match
+            # Process each match
             for match_id, match_info in sorted_matches:
                 match_details = await fetch_match_details(session, match_id)
-                if not match_details:
-                    continue
-
-                group_embed = await create_group_match_embed(
-                    match_details,
-                    match_info['players'],
-                    session
-                )
-                
-                if group_embed:
-                    match_time = format_time(match_info['timestamp'])
-                    await ctx.send(
-                        f"📅 **Team Game am {match_time}** "
-                        f"mit {len(match_info['players'])} geilen Gamern:",
-                        embed=group_embed
-                    )
+                if match_details:
+                    await send_group_match_message(ctx, match_details, match_info, session)
 
     except Exception as e:
-        logger.error(f"Error fetching group history: {str(e)}")
+        logger.error(f"Error in group history: {str(e)}")
         await ctx.send("❌ An error occurred while fetching group match history.")
+
+
+def create_scoreboard_image(match_data: Dict) -> io.BytesIO:
+    """
+    Creates a scoreboard image from match data
+    Returns a BytesIO object containing the PNG image
+    """
+    # Constants for image creation
+    PADDING = 20
+    HEADER_HEIGHT = 60
+    ROW_HEIGHT = 40
+    COLUMN_WIDTHS = {
+        'player': 200,
+        'stats': 60,  # Width for K/D/A/KD/MK columns
+        'adr': 70,    # Slightly wider for ADR
+        'util': 70,   # Width for UTIL
+        'elo': 80     # Width for ELO and change
+    }
+    
+    # Calculate total width and height
+    total_width = PADDING * 2 + COLUMN_WIDTHS['player'] + (COLUMN_WIDTHS['stats'] * 4) + \
+                 COLUMN_WIDTHS['adr'] + COLUMN_WIDTHS['util'] + COLUMN_WIDTHS['elo']
+    total_height = PADDING * 2 + HEADER_HEIGHT + (ROW_HEIGHT * len(match_data['players'])) + 40  # Extra 40px for legend
+    
+    # Create image with dark background
+    image = Image.new('RGB', (total_width, total_height), '#2C2F33')
+    draw = ImageDraw.Draw(image)
+    
+    try:
+        # Load fonts (using default if custom font fails)
+        try:
+            header_font = ImageFont.truetype("arial.ttf", 24)
+            regular_font = ImageFont.truetype("arial.ttf", 20)
+            small_font = ImageFont.truetype("arial.ttf", 16)
+        except:
+            header_font = ImageFont.load_default()
+            regular_font = ImageFont.load_default()
+            small_font = ImageFont.load_default()
+
+        # Draw header
+        header_bg = Image.new('RGB', (total_width, HEADER_HEIGHT), '#23272A')
+        image.paste(header_bg, (0, 0))
+        
+        # Draw map and score
+        draw.text(
+            (PADDING, PADDING),
+            f"{match_data['map']}",
+            font=header_font,
+            fill='#FFFFFF'
+        )
+        draw.text(
+            (PADDING + 200, PADDING),
+            f"{match_data['score']}",
+            font=header_font,
+            fill='#FFFFFF'
+        )
+        draw.text(
+            (total_width - 200, PADDING),
+            match_data['finishedAt'],
+            font=small_font,
+            fill='#99AAB5'
+        )
+
+        # Draw column headers
+        y = HEADER_HEIGHT + 10
+        x = PADDING
+        headers = ['Player', 'K', 'D', 'A', 'K/D', 'ADR', 'MKs', 'UTIL', 'ELO', 'Δ']
+        header_widths = [COLUMN_WIDTHS['player']] + [COLUMN_WIDTHS['stats']] * 4 + \
+                       [COLUMN_WIDTHS['adr']] + [COLUMN_WIDTHS['stats']] + \
+                       [COLUMN_WIDTHS['util']] + [COLUMN_WIDTHS['elo']] * 2
+
+        for header, width in zip(headers, header_widths):
+            draw.text((x, y), header, font=regular_font, fill='#99AAB5')
+            x += width
+
+        # Draw player rows
+        for idx, player in enumerate(match_data['players']):
+            y = HEADER_HEIGHT + ROW_HEIGHT + (ROW_HEIGHT * idx)
+            x = PADDING
+            
+            # Alternate row backgrounds
+            if idx % 2 == 0:
+                row_bg = Image.new('RGB', (total_width, ROW_HEIGHT), '#2F3136')
+                image.paste(row_bg, (0, y))
+
+            # Draw player name
+            draw.text((x, y + 8), player['name'], font=regular_font, fill='#FFFFFF')
+            x += COLUMN_WIDTHS['player']
+
+            # Draw stats
+            stats = [
+                str(player['kills']),
+                str(player['deaths']),
+                str(player['assists']),
+                f"{player['kd']:.2f}",
+                f"{player['adr']:.1f}",
+                str(player['multiKills']),
+                str(player['utilityDmg']),
+                str(player['elo'] or '-'),
+            ]
+            
+            # Draw each stat
+            for stat in stats[:-1]:  # All except ELO change
+                draw.text((x, y + 8), stat, font=regular_font, fill='#FFFFFF', align='center')
+                x += COLUMN_WIDTHS['stats']
+
+            # Draw ELO change with color
+            elo_change = player['eloChange']
+            if elo_change:
+                color = '#43B581' if elo_change > 0 else '#F04747'
+                text = f"+{elo_change}" if elo_change > 0 else str(elo_change)
+            else:
+                color = '#99AAB5'
+                text = '-'
+            draw.text((x, y + 8), text, font=regular_font, fill=color, align='center')
+
+        # Draw legend
+        legend_y = total_height - 30
+        draw.text(
+            (PADDING, legend_y),
+            "MKs = Multi Kills (Double + Triple + Quadro + Penta)  |  UTIL = Utility Damage",
+            font=small_font,
+            fill='#99AAB5'
+        )
+
+        # Convert to bytes
+        byte_array = io.BytesIO()
+        image.save(byte_array, format='PNG')
+        byte_array.seek(0)
+        return byte_array
+
+    except Exception as e:
+        # If there's an error, create a simple error image
+        error_image = Image.new('RGB', (400, 100), '#2C2F33')
+        error_draw = ImageDraw.Draw(error_image)
+        error_draw.text((20, 40), f"Error creating scoreboard: {str(e)}", fill='#FFFFFF')
+        error_bytes = io.BytesIO()
+        error_image.save(error_bytes, format='PNG')
+        error_bytes.seek(0)
+        return error_bytes
 
 @tasks.loop(minutes=5)
 async def check_match_updates():
