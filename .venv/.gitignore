@@ -12,5 +12,3 @@ utils/__pycache__/
 .venv/Lib
 .venv/src/utils/__pycache__/*
 .venv/src/services/__pycache__
-.venv/
-venv/
