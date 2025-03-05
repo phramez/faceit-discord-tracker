@@ -30,8 +30,8 @@ def create_scoreboard_image(match_data: Dict[str, Any]) -> io.BytesIO:
     total_height = (
         PADDING * 2 +
         HEADER_HEIGHT +
-        (ROW_HEIGHT * len(match_data['players'])) +
-        40  # Extra space for legend
+        (ROW_HEIGHT * len(match_data['players']))
+        # Removed extra space for legend
     )
     
     try:
@@ -53,9 +53,34 @@ def create_scoreboard_image(match_data: Dict[str, Any]) -> io.BytesIO:
         header_bg = Image.new('RGB', (total_width, HEADER_HEIGHT), '#23272A')
         image.paste(header_bg, (0, 0))
         
-        # Draw header information
+        # Draw win/loss indicator and header information
+        match_won = match_data.get('match_won', False)
+        
+        # Draw custom win/loss indicator
+        if match_won:
+            indicator_text = "WIN"
+            indicator_color = '#43B581'  # Green
+        else:
+            indicator_text = "LOSS"
+            indicator_color = '#F04747'  # Red
+            
+        # Draw colored indicator box
+        indicator_width = 60
+        indicator_height = 30
+        indicator_box = Image.new('RGB', (indicator_width, indicator_height), indicator_color)
+        image.paste(indicator_box, (PADDING, PADDING))
+        
+        # Draw indicator text
         draw.text(
-            (PADDING, PADDING),
+            (PADDING + 10, PADDING + 3),  # Centered in box
+            indicator_text,
+            font=regular_font,
+            fill='#FFFFFF'
+        )
+        
+        # Draw map name after indicator
+        draw.text(
+            (PADDING + indicator_width + 10, PADDING),
             match_data['map'],
             font=header_font,
             fill='#FFFFFF'
@@ -149,14 +174,7 @@ def create_scoreboard_image(match_data: Dict[str, Any]) -> io.BytesIO:
                 align='center'
             )
 
-        # Draw legend at bottom
-        legend_y = total_height - 30
-        draw.text(
-            (PADDING, legend_y),
-            "MKs = Multi Kills | UTIL = Utility Damage | ADR = Average Damage per Round",
-            font=small_font,
-            fill='#99AAB5'
-        )
+        # Legend removed
 
         # Convert to bytes
         byte_array = io.BytesIO()

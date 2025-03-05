@@ -1,62 +1,91 @@
-# FACEIT Match Tracker Discord Bot
+# FACEIT Discord Bot
 
-A Discord bot that tracks FACEIT players and notifies when they complete matches.
+A Discord bot for tracking FACEIT players and matches in CS2.
 
 ## Features
 
-- Track FACEIT players and get notifications when they complete matches
-- View recent match history for tracked players
-- List all currently tracked players
-- Detailed match information including scores, teammates, and opponents
+- Track FACEIT players and their match results
+- Get notifications when tracked players finish matches
+- View recent matches and stats
+- Track group matches where multiple players played together
+- Monitor ELO changes
 
 ## Setup
 
-### Prerequisites
+1. Make sure you have Python 3.9+ installed
+2. Clone this repository
+3. Create a virtual environment (optional but recommended):
+   ```
+   python -m venv .venv
+   ```
+4. Activate the virtual environment:
+   - Windows: `.venv\Scripts\activate`
+   - Mac/Linux: `source .venv/bin/activate`
+5. Install dependencies:
+   ```
+   pip install -r requirements.txt
+   ```
+6. Set up environment variables in a `.env` file:
+   ```
+   DISCORD_TOKEN=your_discord_bot_token
+   FACEIT_API_KEY=your_faceit_api_key
+   ```
+   
+   You need to create a Discord bot at [Discord Developer Portal](https://discord.com/developers/applications) 
+   and get a FACEIT API key from [FACEIT Developer Portal](https://developers.faceit.com/).
 
-- Python 3.8 or higher
-- A Discord bot token (create one at [Discord Developer Portal](https://discord.com/developers/applications))
-- A FACEIT API key (get one at [FACEIT Developer Portal](https://developers.faceit.com/))
+## Running the Bot
 
-### Installation
-
-1. Clone this repository:
+### Windows
+Double-click `run_bot.bat` or run from command line:
 ```
-git clone https://github.com/yourusername/faceit-discord-bot.git
-cd faceit-discord-bot
+.venv\Scripts\python main.py
 ```
 
-2. Install the required dependencies:
+### Mac/Linux
+Make the script executable first:
 ```
-pip install -r requirements.txt
-```
-
-3. Create a `.env` file in the root directory of the project with the following content:
-```
-DISCORD_TOKEN=your_discord_token_here
-FACEIT_API_KEY=your_faceit_api_key_here
+chmod +x run_bot.sh
 ```
 
-### Running the Bot
-
+Then run:
 ```
-python bot.py
+./run_bot.sh
 ```
 
-## Usage
+Or directly:
+```
+.venv/bin/python main.py
+```
 
-Once the bot is running and has been invited to your Discord server, you can use the following commands:
+## Discord Commands
 
-- `!track <nickname>` - Start tracking a FACEIT player
-- `!untrack <nickname>` - Stop tracking a FACEIT player
+- `!track <nickname>` - Track a FACEIT player
+- `!untrack <nickname>` - Stop tracking a player
 - `!list` - List all tracked players
-- `!recent <nickname> [count]` - Show recent matches for a player (default: 3, max: 10)
+- `!recent <nickname> [count]` - Show recent matches for a player
+- `!grouphistory [count]` - Show matches where 3+ tracked players played together
+- `!addchannel [#channel]` - Add a channel for notifications
+- `!removechannel [#channel]` - Remove a channel from notifications
+- `!listchannels` - List all notification channels
 
-## Notes
+## Project Structure
 
-- The bot checks for match updates every 10 minutes
-- Tracked players are saved to a JSON file so they persist between bot restarts
-- The bot will only notify about finished matches
+```
+├── main.py                 # Main entry point
+├── .env                    # Environment variables (create this)
+├── tracked_players.json    # Storage for tracked players
+├── player_elo_history.json # Storage for ELO history
+├── src/
+│   ├── bot.py              # Bot setup and initialization
+│   ├── config.py           # Configuration variables
+│   ├── cogs/               # Discord command modules
+│   ├── services/           # Core services
+│   └── utils/              # Utility modules
+```
 
-## License
+## Troubleshooting
 
-MIT
+- If the bot doesn't run, check that your `.env` file is properly set up
+- Make sure the bot has the necessary permissions in your Discord server
+- Check the logs for detailed error messages

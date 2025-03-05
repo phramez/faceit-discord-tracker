@@ -18,9 +18,27 @@ class StorageService:
             with open(filename, 'r') as f:
                 return json.load(f)
         except FileNotFoundError:
+            # Create the file with default content
+            try:
+                with open(filename, 'w') as f:
+                    json.dump(default, f)
+                logger.info(f"Created new storage file: {filename}")
+            except Exception as e:
+                logger.error(f"Error creating {filename}: {str(e)}")
             return default
         except json.JSONDecodeError as e:
             logger.error(f"Error decoding {filename}: {str(e)}")
+            # Backup corrupted file and create a new one
+            try:
+                import os
+                backup_name = f"{filename}.backup_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                os.rename(filename, backup_name)
+                logger.warning(f"Backed up corrupted file to {backup_name}")
+                with open(filename, 'w') as f:
+                    json.dump(default, f)
+                logger.info(f"Created new storage file: {filename}")
+            except Exception as backup_error:
+                logger.error(f"Error backing up corrupted file: {str(backup_error)}")
             return default
 
     def save_tracked_players(self) -> None:

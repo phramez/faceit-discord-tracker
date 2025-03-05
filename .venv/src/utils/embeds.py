@@ -143,13 +143,20 @@ async def create_group_match_embed(
 
     # Process match data
     round_data = stats_data['rounds'][0]
-    map_name = round_data['round_stats'].get('Map', 'Unknown Map')
+    map_name_raw = round_data['round_stats'].get('Map', 'Unknown Map')
+    
+    # Format map name (de_inferno -> Inferno)
+    map_name = map_name_raw
+    if map_name_raw.startswith('de_'):
+        map_name = map_name_raw[3:].capitalize()
+    
     score = round_data['round_stats'].get('Score', '0 / 0')
     winning_team = match_data.get('results', {}).get('winner', '').replace('faction', 'team')
 
     # Track player information
     player_teams = {}
     tracked_player_teams = set()
+    players_by_team = {"team1": 0, "team2": 0}
     all_player_stats = []
 
     # Process teams and players
@@ -162,6 +169,7 @@ async def create_group_match_embed(
             if any(p[0].lower() == player_name.lower() for p in tracked_players_info):
                 player_teams[player_id] = team_name
                 tracked_player_teams.add(team_name)
+                players_by_team[team_name] += 1
                 
                 stats = player.get('player_stats', {})
                 
@@ -193,17 +201,24 @@ async def create_group_match_embed(
                     'multiKills': multi_kills,
                     'utilityDmg': int(stats.get('Utility Damage', 0)),
                     'elo': current_elo,
-                    'eloChange': elo_change
+                    'eloChange': elo_change,
+                    'team': team_name
                 })
 
     # Sort players by ADR
     all_player_stats.sort(key=lambda x: x['adr'], reverse=True)
+    
+    # Determine if match was won by majority of tracked players
+    majority_team = "team1" if players_by_team["team1"] > players_by_team["team2"] else "team2"
+    match_won = majority_team == winning_team
+    win_indicator = "WIN" if match_won else "LOSS"
 
-    # Create Discord embed
+    # Create Discord embed - still use emoji in Discord embed since it renders fine there
+    embed_indicator = "✅" if match_won else "❌"
     embed = discord.Embed(
-        title="🎮 Group Match",
+        title=f"{embed_indicator} Group Match",
         url=match_data.get('faceit_url', '').replace('{lang}', 'de'),
-        color=discord.Color.gold()
+        color=discord.Color.green() if match_won else discord.Color.red()
     )
 
     # Add match info
@@ -218,6 +233,8 @@ async def create_group_match_embed(
             'map': map_name,
             'score': score,
             'finishedAt': finished_at,
-            'players': all_player_stats
+            'players': all_player_stats,
+            'win_indicator': win_indicator,
+            'match_won': match_won
         }
     }

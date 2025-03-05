@@ -110,6 +110,9 @@ class MatchTracker:
     async def _process_group_match(self, match_details, players, channels, session):
         """Process and send notifications for group matches"""
         try:
+            # Import inside function to avoid circular imports
+            from src.utils.embeds import create_group_match_embed
+            
             result = await create_group_match_embed(match_details, players, session)
             if result:
                 image_bytes = create_scoreboard_image(result['react_data'])
@@ -127,6 +130,25 @@ class MatchTracker:
         
         except Exception as e:
             logger.error(f"Error processing group match: {str(e)}")
+
+    async def _process_individual_match(self, match_details, nickname, channels, session):
+        """Process and send notifications for individual matches"""
+        try:
+            # Import inside function to avoid circular imports
+            from src.utils.embeds import create_match_embed
+            
+            embed = await create_match_embed(match_details, nickname, session)
+            for channel in channels:
+                try:
+                    await channel.send(
+                        f"New Match Result for {nickname}:",
+                        embed=embed
+                    )
+                except Exception as e:
+                    logger.error(f"Error sending to channel {channel.id}: {str(e)}")
+        
+        except Exception as e:
+            logger.error(f"Error processing individual match: {str(e)}")
 
     async def _process_individual_match(self, match_details, nickname, channels, session):
         """Process and send notifications for individual matches"""

@@ -18,7 +18,3 @@ faceit-discord-tracker/hooks/
 faceit-discord-tracker/objects/pack/
 .venv/src/utils/__pycache__/*
 .venv/src/services/__pycache__
-.venv/src/services/__pycache__/storage.cpython-313.pyc
-.venv/src/cogs/__pycache__/match_history.cpython-313.pyc
-.venv/
-venv/

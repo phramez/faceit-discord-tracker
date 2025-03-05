@@ -47,18 +47,30 @@ async def load_cogs():
                 logger.error(f'Failed to load cog {filename}: {str(e)}')
 
 async def main():
-    if not os.getenv('DISCORD_TOKEN'):
-        logger.error("DISCORD_TOKEN environment variable not set")
-        return
-    if not os.getenv('FACEIT_API_KEY'):
-        logger.error("FACEIT_API_KEY environment variable not set")
-        return
+    """Main bot execution function"""
+    # Environment variables should already be validated by the initialization process
+    discord_token = os.getenv('DISCORD_TOKEN')
     
+    # Start the bot, setup match tracker, and run until closed
     try:
+        # Initialize the match tracker service
+        from src.services import start_match_tracker
+        tracker = await start_match_tracker(bot)
+        
+        # Start the bot
+        logger.info("Starting Discord bot...")
         async with bot:
-            await bot.start(os.getenv('DISCORD_TOKEN'))
+            await bot.start(discord_token)
     except Exception as e:
         logger.error(f"Error running bot: {str(e)}")
+        raise
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # If running directly (not imported), first initialize project
+    from src.utils.setup import initialize_project
+    if initialize_project():
+        asyncio.run(main())
+    else:
+        logger.error("Failed to initialize project. Please check the logs for details.")
+        import sys
+        sys.exit(1)
