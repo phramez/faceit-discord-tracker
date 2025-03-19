@@ -106,16 +106,18 @@ class StorageService:
             # Automatically save when new guild is added
             self.save_tracked_players()
         return self.tracked_players[guild_id]
+    
+    def get_player_id_by_nickname(self, guild_id: str, nickname: str) -> Optional[str]:
+        guild_data = self.get_guild_data(guild_id)
+        
+        # Case-insensitive comparison
+        for tracked_nickname, player_id in guild_data["players"].items():
+            if tracked_nickname.lower() == nickname.lower():
+                return player_id
+        
+        return None 
 
     def add_player(self, guild_id: str, nickname: str, player_id: str) -> None:
-        """
-        Add a player to tracked players for a specific guild
-        
-        Args:
-            guild_id (str): Discord guild ID
-            nickname (str): Player's nickname
-            player_id (str): Player's FACEIT ID
-        """
         guild_data = self.get_guild_data(guild_id)
         guild_data["players"][nickname] = player_id
         

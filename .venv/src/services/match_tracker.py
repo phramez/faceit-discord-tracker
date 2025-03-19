@@ -150,27 +150,6 @@ class MatchTracker:
         except Exception as e:
             logger.error(f"Error processing individual match: {str(e)}")
 
-    async def _process_individual_match(self, match_details, nickname, channels, session):
-        """Process and send notifications for individual matches"""
-        try:
-            embed = await create_match_embed(match_details, nickname, session)
-            for channel in channels:
-                try:
-                    await channel.send(
-                        f"New Match Result for {nickname}:",
-                        embed=embed
-                    )
-                except Exception as e:
-                    logger.error(f"Error sending to channel {channel.id}: {str(e)}")
-        
-        except Exception as e:
-            logger.error(f"Error processing individual match: {str(e)}")
-
-    @check_match_updates.before_loop
-    async def before_check_match_updates(self):
-        """Wait for bot to be ready before starting the loop"""
-        await self.bot.wait_until_ready()
-
 async def start_match_tracker(bot):
     """Initialize and start the match tracker"""
     tracker = MatchTracker(bot)

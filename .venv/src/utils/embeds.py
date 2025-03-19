@@ -35,6 +35,7 @@ async def create_match_embed(match_data: Dict[str, Any], player_nickname: str, s
     stats_data = await faceit_api.fetch_match_stats(match_id)
     player_team = None
     player_id = None
+    tracked_player_id = None  # This will store the ID from our tracking system
     current_elo = None
     
     if stats_data and 'rounds' in stats_data:
@@ -97,15 +98,27 @@ async def create_match_embed(match_data: Dict[str, Any], player_nickname: str, s
         embed.add_field(name="Result", value=win_status, inline=True)
     
     # Add ELO information
-    if player_id:
+    # This is a key issue - we need to find the tracked player ID from our storage
+    # since we don't have guild_id in this function, we need to search all guilds
+    for guild_id in storage.tracked_players:
+        guild_data = storage.tracked_players[guild_id]
+        for nickname, id in guild_data["players"].items():
+            if nickname.lower() == player_nickname.lower():
+                tracked_player_id = id
+                break
+        if tracked_player_id:
+            break
+    
+    # If we found the tracked ID, use it instead of the player_id from the API
+    if tracked_player_id:
         # Get current ELO from storage or calculate from ELO history
-        elo_history = storage.player_elo_history.get(player_id, {})
+        elo_history = storage.player_elo_history.get(tracked_player_id, {})
         current_elo = elo_history.get('current')
         elo_history_list = elo_history.get('history', [])
         
         if current_elo is not None:
             # Attempt to update ELO
-            await update_player_elo(storage, player_id, current_elo)
+            await update_player_elo(storage, tracked_player_id, current_elo)
             
             elo_change_text = ""
             if elo_history_list:
@@ -202,11 +215,13 @@ async def create_group_match_embed(
                 
                 stats = player.get('player_stats', {})
                 
-                # Get ELO info from storage
+                # Get ELO info from storage - CRITICAL FIX HERE: 
+                # Use the tracked_id from our storage instead of player_id from the API
                 current_elo = None
                 elo_change = 0
                 
                 try:
+                    # This is the key fix - use tracked_id to get ELO from storage
                     elo_data = storage.player_elo_history.get(tracked_id, {})
                     current_elo = elo_data.get('current')
                     elo_history = elo_data.get('history', [])
@@ -220,7 +235,7 @@ async def create_group_match_embed(
                 except Exception as e:
                     logger.error(f"Error processing ELO for {nickname}: {str(e)}")
                 
-                # Attempt to update ELO
+                # Attempt to update ELO - ALSO USE tracked_id HERE
                 if current_elo is not None:
                     await update_player_elo(storage, tracked_id, current_elo)
 
@@ -229,7 +244,7 @@ async def create_group_match_embed(
                     'Double Kills', 'Triple Kills', 'Quadro Kills', 'Penta Kills'
                 ])
 
-                # Prepare player stats
+                # Prepare player stats - pass correct ELO to the UI
                 all_player_stats.append({
                     'name': nickname,
                     'kills': int(stats.get('Kills', 0)),
@@ -243,6 +258,7 @@ async def create_group_match_embed(
                     'eloChange': elo_change,
                     'team': team_name
                 })
+
 
     # Sort players by ADR
     all_player_stats.sort(key=lambda x: x['adr'], reverse=True)
