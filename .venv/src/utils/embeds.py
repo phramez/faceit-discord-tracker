@@ -35,6 +35,7 @@ async def create_match_embed(match_data: Dict[str, Any], player_nickname: str, s
     stats_data = await faceit_api.fetch_match_stats(match_id)
     player_team = None
     player_id = None
+    current_elo = None
     
     if stats_data and 'rounds' in stats_data:
         for round_data in stats_data['rounds']:
@@ -48,6 +49,30 @@ async def create_match_embed(match_data: Dict[str, Any], player_nickname: str, s
                         if player.get('nickname', '').lower() == player_nickname.lower():
                             player_team = f"team{team_idx + 1}"
                             player_id = player.get('player_id')
+                            
+                            # Get player stats
+                            stats = player.get('player_stats', {})
+                            
+                            # Calculate stats
+                            kills = stats.get('Kills', 'N/A')
+                            deaths = stats.get('Deaths', 'N/A')
+                            
+                            try:
+                                kd_ratio = float(kills) / float(deaths) if float(deaths) > 0 else float(kills)
+                                kd_ratio = round(kd_ratio, 2)
+                            except (ValueError, TypeError):
+                                kd_ratio = 'N/A'
+                            
+                            # Add player performance section
+                            embed.add_field(
+                                name=f"Player: {player_nickname}",
+                                value=(
+                                    f"Kills: {kills}\n"
+                                    f"Deaths: {deaths}\n"
+                                    f"K/D: {kd_ratio}"
+                                ),
+                                inline=False
+                            )
                             break
                     if player_team:
                         break
@@ -60,34 +85,6 @@ async def create_match_embed(match_data: Dict[str, Any], player_nickname: str, s
                     inline=True
                 )
                 break
-        
-        # Find player stats
-        for round_data in stats_data['rounds']:
-            for team in round_data.get('teams', []):
-                for player_stats in team.get('players', []):
-                    if player_stats.get('nickname', '').lower() == player_nickname.lower():
-                        stats = player_stats.get('player_stats', {})
-                        
-                        # Calculate stats
-                        kills = stats.get('Kills', 'N/A')
-                        deaths = stats.get('Deaths', 'N/A')
-                        
-                        try:
-                            kd_ratio = float(kills) / float(deaths) if float(deaths) > 0 else float(kills)
-                            kd_ratio = round(kd_ratio, 2)
-                        except (ValueError, TypeError):
-                            kd_ratio = 'N/A'
-                        
-                        # Add player performance section
-                        embed.add_field(
-                            name=f"Player: {player_nickname}",
-                            value=(
-                                f"Kills: {kills}\n"
-                                f"Deaths: {deaths}\n"
-                                f"K/D: {kd_ratio}"
-                            ),
-                            inline=False
-                        )
     
     # Set embed color based on win/loss
     if player_team and winning_team:
@@ -101,13 +98,18 @@ async def create_match_embed(match_data: Dict[str, Any], player_nickname: str, s
     
     # Add ELO information
     if player_id:
-        current_elo = storage.player_elo_history.get(player_id, {}).get('current')
-        elo_history = storage.player_elo_history.get(player_id, {}).get('history', [])
+        # Get current ELO from storage or calculate from ELO history
+        elo_history = storage.player_elo_history.get(player_id, {})
+        current_elo = elo_history.get('current')
+        elo_history_list = elo_history.get('history', [])
         
-        if current_elo:
+        if current_elo is not None:
+            # Attempt to update ELO
+            await update_player_elo(storage, player_id, current_elo)
+            
             elo_change_text = ""
-            if elo_history:
-                last_change = elo_history[-1]
+            if elo_history_list:
+                last_change = elo_history_list[-1]
                 change = last_change.get('change', 0)
                 
                 # Ensure ELO change matches win/loss status
@@ -125,6 +127,25 @@ async def create_match_embed(match_data: Dict[str, Any], player_nickname: str, s
             )
     
     return embed
+
+async def update_player_elo(storage: StorageService, player_id: str, current_elo: Optional[int]):
+    """
+    Ensure player's ELO is updated in storage if a valid ELO is provided.
+    
+    Args:
+        storage (StorageService): The storage service instance
+        player_id (str): The player's FACEIT ID
+        current_elo (Optional[int]): The current ELO value
+    """
+    if current_elo is not None:
+        # Fetch existing ELO information
+        existing_elo_data = storage.player_elo_history.get(player_id, {})
+        existing_current_elo = existing_elo_data.get('current')
+        
+        # Only update if ELO has changed or doesn't exist
+        if existing_current_elo is None or existing_current_elo != current_elo:
+            storage.update_player_elo(player_id, current_elo)
+
 
 async def create_group_match_embed(
     match_data: Dict[str, Any],
@@ -166,24 +187,42 @@ async def create_group_match_embed(
             player_id = player.get('player_id', '')
             player_name = player.get('nickname', '')
             
-            if any(p[0].lower() == player_name.lower() for p in tracked_players_info):
+            # Check if this player is one of the tracked players
+            matched_player = next((
+                (nickname, tracked_id) 
+                for (nickname, tracked_id) in tracked_players_info 
+                if nickname.lower() == player_name.lower()
+            ), None)
+            
+            if matched_player:
+                nickname, tracked_id = matched_player
                 player_teams[player_id] = team_name
                 tracked_player_teams.add(team_name)
                 players_by_team[team_name] += 1
                 
                 stats = player.get('player_stats', {})
                 
-                # Get ELO info
-                current_elo = storage.player_elo_history.get(player_id, {}).get('current')
-                elo_history = storage.player_elo_history.get(player_id, {}).get('history', [])
+                # Get ELO info from storage
+                current_elo = None
                 elo_change = 0
                 
-                if elo_history:
-                    last_change = elo_history[-1].get('change', 0)
-                    if team_name == winning_team:
-                        elo_change = abs(last_change)
-                    else:
-                        elo_change = -abs(last_change)
+                try:
+                    elo_data = storage.player_elo_history.get(tracked_id, {})
+                    current_elo = elo_data.get('current')
+                    elo_history = elo_data.get('history', [])
+                    
+                    if elo_history:
+                        last_change = elo_history[-1].get('change', 0)
+                        if team_name == winning_team:
+                            elo_change = abs(last_change)
+                        else:
+                            elo_change = -abs(last_change)
+                except Exception as e:
+                    logger.error(f"Error processing ELO for {nickname}: {str(e)}")
+                
+                # Attempt to update ELO
+                if current_elo is not None:
+                    await update_player_elo(storage, tracked_id, current_elo)
 
                 # Calculate multi-kills
                 multi_kills = sum(int(stats.get(kill_type, 0)) for kill_type in [
@@ -192,7 +231,7 @@ async def create_group_match_embed(
 
                 # Prepare player stats
                 all_player_stats.append({
-                    'name': player_name,
+                    'name': nickname,
                     'kills': int(stats.get('Kills', 0)),
                     'deaths': int(stats.get('Deaths', 0)),
                     'assists': int(stats.get('Assists', 0)),
@@ -213,7 +252,7 @@ async def create_group_match_embed(
     match_won = majority_team == winning_team
     win_indicator = "WIN" if match_won else "LOSS"
 
-    # Create Discord embed - still use emoji in Discord embed since it renders fine there
+    # Create Discord embed
     embed_indicator = "✅" if match_won else "❌"
     embed = discord.Embed(
         title=f"{embed_indicator} Group Match",
