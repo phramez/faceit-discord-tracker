@@ -26,7 +26,7 @@ async def create_match_embed(match_data: Dict[str, Any], player_nickname: str, s
     # Add match times
     finished_at = faceit_api.format_time(match_data.get('finished_at'))
     embed.add_field(
-        name="Finished", 
+        name="Beendet", 
         value=finished_at if match_data.get('finished_at') else "In Progress", 
         inline=True
     )
@@ -79,21 +79,21 @@ async def create_match_embed(match_data: Dict[str, Any], player_nickname: str, s
                         break
                 
                 # Add win/loss indicator to round score
-                win_indicator = "✅" if (winning_team == player_team) else "❌"
-                embed.add_field(
-                    name="Rounds",
-                    value=f"{round_score} {win_indicator}",
-                    inline=True
-                )
+                # win_indicator = "✅" if (winning_team == player_team) else "❌"
+                # embed.add_field(
+                #     name="Rounds",
+                #     value=f"{round_score} {win_indicator}",
+                #     inline=True
+                # )
                 break
     
     # Set embed color based on win/loss
     if player_team and winning_team:
         if winning_team == player_team:
-            win_status = "✅ Victory"
+            win_status = "✅ Easy Win"
             embed.color = discord.Color.green()
         else:
-            win_status = "❌ Defeat"
+            win_status = "❌ Verkaggert"
             embed.color = discord.Color.red()
         embed.add_field(name="Result", value=win_status, inline=True)
     

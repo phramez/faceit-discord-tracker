@@ -31,24 +31,30 @@ class EloTracker(commands.Cog):
     @commands.command(name='updateelo')
     async def update_elo_command(self, ctx):
         """Manually trigger an update of ELO for all tracked players"""
-        await ctx.send("🔄 Updating ELO for all tracked players... This might take a moment.")
+        await ctx.send("🔄 Elo für getrackte Spieler updaten.")
         
         updated = await self.fetch_and_update_all_elo()
         
         if updated:
-            await ctx.send(f"✅ Successfully updated ELO for {updated} players!")
+            await ctx.send(f"✅ Geupdatet für {updated} Bobs!")
         else:
             await ctx.send("❌ No players found to update or there was an error.")
     
     @commands.command(name='elo')
     async def show_player_elo(self, ctx, nickname: str = None):
-        """Show ELO for a player or all tracked players"""
+        """Show ELO for a player or all tracked players with 7-day change"""
         guild_id = str(ctx.guild.id)
         guild_data = self.storage.get_guild_data(guild_id)
         
         if not guild_data["players"]:
             await ctx.send("No players are being tracked in this server.")
             return
+        
+        # Current timestamp for calculating 7 days ago
+        import time
+        from datetime import datetime, timedelta
+        current_time = time.time()
+        seven_days_ago = current_time - (7 * 24 * 60 * 60)  # 7 days in seconds
         
         if nickname:
             # Show ELO for specific player
@@ -67,13 +73,31 @@ class EloTracker(commands.Cog):
             
             # Get ELO history
             history = elo_data.get('history', [])
-            if history:
-                last_change = history[-1].get('change', 0)
-                change_indicator = f" (+{last_change})" if last_change > 0 else f" ({last_change})"
-            else:
-                change_indicator = ""
             
-            await ctx.send(f"**{nickname}** current ELO: **{current_elo}**{change_indicator}")
+            # We're skipping the most recent change as per the requested format
+            
+            # Calculate 7-day change
+            seven_day_change = 0
+            seven_day_text = ""
+            
+            if history:
+                # Find ELO 7 days ago
+                elo_7_days_ago = current_elo  # Default to current if no history found
+                
+                # Iterate through history in reverse to find closest entry before 7 days ago
+                for entry in reversed(history):
+                    entry_time = entry.get('timestamp', 0)
+                    if entry_time <= seven_days_ago:
+                        elo_7_days_ago = entry.get('previous', elo_7_days_ago)
+                        break
+                
+                # Calculate change
+                seven_day_change = current_elo - elo_7_days_ago
+                
+                if seven_day_change != 0:
+                    seven_day_text = f" | 7-Tage: {'+' if seven_day_change > 0 else ''}{seven_day_change}"
+            
+            await ctx.send(f"**{nickname}**: {current_elo}{seven_day_text}")
         else:
             # Show ELO for all tracked players
             all_players_data = []
@@ -85,13 +109,42 @@ class EloTracker(commands.Cog):
                 if current_elo is not None:
                     # Get ELO history
                     history = elo_data.get('history', [])
-                    if history:
-                        last_change = history[-1].get('change', 0)
-                        change_indicator = f" (+{last_change})" if last_change > 0 else f" ({last_change})"
-                    else:
-                        change_indicator = ""
                     
-                    all_players_data.append((player_nickname, current_elo, change_indicator))
+                    # Get last change
+                    last_change = 0
+                    last_update = "N/A"
+                    
+                    if history:
+                        last_entry = history[-1]
+                        last_change = last_entry.get('change', 0)
+                        last_timestamp = last_entry.get('timestamp')
+                        if last_timestamp:
+                            last_update = datetime.fromtimestamp(last_timestamp).strftime("%d.%m")
+                    
+                    # Calculate 7-day change
+                    seven_day_change = 0
+                    
+                    if history:
+                        # Find ELO 7 days ago
+                        elo_7_days_ago = current_elo  # Default to current if no history found
+                        
+                        # Iterate through history in reverse to find closest entry before 7 days ago
+                        for entry in reversed(history):
+                            entry_time = entry.get('timestamp', 0)
+                            if entry_time <= seven_days_ago:
+                                elo_7_days_ago = entry.get('previous', elo_7_days_ago)
+                                break
+                        
+                        # Calculate change
+                        seven_day_change = current_elo - elo_7_days_ago
+                    
+                    all_players_data.append((
+                        player_nickname,
+                        current_elo,
+                        last_change,
+                        seven_day_change,
+                        last_update
+                    ))
             
             if not all_players_data:
                 await ctx.send("No ELO data available for any tracked players. Try running `!updateelo` first.")
@@ -101,9 +154,43 @@ class EloTracker(commands.Cog):
             all_players_data.sort(key=lambda x: x[1], reverse=True)
             
             # Create message
-            players_list = "\n".join([f"**{nickname}**: {elo}{change}" for nickname, elo, change in all_players_data])
+            players_list = []
+            for nickname, elo, last_change, seven_day_change, last_update in all_players_data:
+                # Format: "**nickname**: elo | 7-Tage: +/-change"
+                seven_day_str = f" | 7-Tage: {'+' if seven_day_change > 0 else ''}{seven_day_change}" if seven_day_change != 0 else ""
+                
+                players_list.append(f"**{nickname}**: {elo}{seven_day_str}")
             
-            await ctx.send(f"**Current ELO for Tracked Players:**\n{players_list}")
+            # Create embed with player list (if too long)
+            message = "\n".join(players_list)
+            
+            if len(message) > 1900:  # Discord message limit safety margin
+                # Create chunks of players
+                chunks = []
+                current_chunk = []
+                current_length = 0
+                
+                for line in players_list:
+                    if current_length + len(line) + 1 > 1900:  # +1 for newline
+                        chunks.append("\n".join(current_chunk))
+                        current_chunk = [line]
+                        current_length = len(line)
+                    else:
+                        current_chunk.append(line)
+                        current_length += len(line) + 1  # +1 for newline
+                
+                if current_chunk:
+                    chunks.append("\n".join(current_chunk))
+                
+                # Send first chunk with header
+                await ctx.send(f"**Aktuelle Elo:**\n{chunks[0]}")
+                
+                # Send additional chunks
+                for chunk in chunks[1:]:
+                    await ctx.send(chunk)
+            else:
+                # Send as a single message
+                await ctx.send(f"**Aktuelle Elo:**\n{message}")
     
     async def fetch_and_update_all_elo(self) -> int:
         """
